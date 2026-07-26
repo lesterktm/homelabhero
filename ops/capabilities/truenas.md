@@ -53,11 +53,48 @@ skill to read the live surface off the box instead of guessing.
 - Start/stop an app (confirm): `midclt call app.start <name>` / `app.stop <name>`
 - Catalog / available apps: `midclt call catalog.query`
 
-## Virtualization (Incus/KVM instances)
+## Virtualization (version-dependent - detect the backend first)
 
-- Instances: `midclt call virt.instance.query | jq '.[] | {name, type, status}'`
-  (older releases: `midclt call vm.query`)
-- Start/stop (confirm): `midclt call virt.instance.start <name>` / `.stop`
+The VM/container backend changed twice, so the right method names depend on the
+release. NEVER assume; read the version, then use the matching namespace. All of
+this is over `midclt` on the local socket, which is unaffected by the REST API
+removal in 26 - the SSH + midclt path stays valid on every version.
+
+    hh run truenas "midclt call system.version"     # e.g. 24.10.2, 25.04.2, 25.10.1, 26.0-BETA.x
+    # then confirm which namespaces actually exist on this box:
+    hh run truenas "midclt call core.get_methods | python3 -c \"import json,sys;[print(k) for k in sorted(json.load(sys.stdin)) if k.split('.')[0] in ('vm','virt','container')]\""
+
+Three eras, three backends:
+
+- 24.10 (Electric Eel) and earlier - libvirt + QEMU/KVM VMs only, no containers.
+  Namespace `vm.*`:
+    `midclt call vm.query | jq '.[] | {id, name, status: .status.state}'`
+    Start/stop (confirm): `midclt call vm.start <id>` / `midclt call vm.stop <id>`
+    Devices: `midclt call vm.device.query`
+
+- 25.04 (Fangtooth) and 25.10 (Goldeye) - Incus, for BOTH LXC containers and
+  QEMU/KVM VMs (the "Containers" and "Virtual Machines" screens). Namespace
+  `virt.instance.*`; the `type` field is `CONTAINER` or `VM`:
+    `midclt call virt.instance.query | jq '.[] | {name, type, status}'`
+    Start/stop (confirm): `midclt call virt.instance.start <name>` / `.stop`
+    Global config (pool that holds instances): `midclt call virt.global.config`
+    Also: `virt.device.query`, `virt.volume.query`
+    Incus storage lives in a hidden `.ix-virt` dataset on the instances pool;
+    zvols under it are the instance disks.
+
+- 26 (beta) - Incus REMOVED, replaced by libvirt managing QEMU/KVM VMs and
+  libvirt_lxc containers. VMs are managed through the `vm.*` namespace again;
+  LXC containers through their own namespace (discover the exact name with the
+  `core.get_methods` filter above - it is still shifting in beta). The upgrade
+  migrates Incus `.ix-virt` zvols into libvirt VM definitions. Known beta
+  pitfalls: orphaned LXCs, VMs that vanish from the UI while their zvols survive
+  under `.ix-virt`, and libvirt_lxc mount/startup failures - see the gotchas in
+  infra/truenas.md before touching a migrated instance.
+
+When the method name is not obvious (especially on 26), use the
+truenas-middleware skill to read the live surface and each method's schema rather
+than guessing. Treat any `.start`/`.stop`/`.create`/`.update`/`.delete` as
+state-changing and confirm first.
 
 ## Data protection
 

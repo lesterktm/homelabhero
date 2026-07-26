@@ -35,8 +35,20 @@ be present, so check with `command -v jq` before relying on it.
 
 Namespaces are regular: `pool.*`, `pool.dataset.*`, `pool.snapshottask.*`,
 `app.*`, `service.*`, `interface.*`, `sharing.smb.*`, `replication.*`,
-`disk.*`, `system.*`, `virt.instance.*`, and so on. Filter by the prefix that
-matches the task.
+`disk.*`, `system.*`, and so on. Filter by the prefix that matches the task.
+
+The virtualization namespace is the big version trap - it changed backend twice
+and the method names moved with it, so ALWAYS discover it live rather than
+recalling a name:
+
+    # what VM/container methods actually exist on THIS box
+    midclt call core.get_methods | python3 -c "import json,sys;[print(k) for k in sorted(json.load(sys.stdin)) if k.split('.')[0] in ('vm','virt','container')]"
+
+Expect one of: `vm.*` (libvirt VMs, on 24.10 and earlier, and again on 26),
+`virt.instance.*` plus `virt.global.*`/`virt.device.*`/`virt.volume.*` (Incus,
+on 25.04 and 25.10), or a libvirt_lxc container namespace (26). Pair the result
+with `midclt call system.version` so you know which era you are on. On 26 beta
+the names are still shifting - trust the live list, not memory.
 
 ## Inspect a method BEFORE you call it
 

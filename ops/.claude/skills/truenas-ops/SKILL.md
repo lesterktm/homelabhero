@@ -74,3 +74,26 @@ before any risky change.
 
     hh run truenas "midclt call app.query | jq '.[] | {name, state}'"
     hh run truenas "docker ps"      # if custom Docker apps are in use
+
+## VMs and containers (backend changed by version - detect first)
+
+The virtualization backend is different across releases, so the midclt
+namespace is different too. Do not assume: read the version, then use the
+matching API. `midclt` runs over the local socket, so the REST API removal in
+26 does not affect this path.
+
+    hh run truenas "midclt call system.version"
+
+- 24.10 and earlier: libvirt VMs only, `vm.*` (`vm.query`, `vm.start`, `vm.stop`).
+- 25.04 / 25.10: Incus for containers AND VMs, `virt.instance.*`
+  (`type` = CONTAINER or VM). Instance disks live in the hidden `.ix-virt`
+  dataset. `virt.global.config` shows the instances pool.
+- 26 (beta): Incus removed, libvirt runs QEMU/KVM VMs (`vm.*`) and libvirt_lxc
+  containers (own namespace). Upgrades migrate `.ix-virt` zvols to libvirt VMs;
+  expect orphaned LXCs and VMs missing from the UI (zvols usually survive under
+  `.ix-virt`).
+
+See "Virtualization" in capabilities/truenas.md for the full command set. When a
+method name is unclear (common on 26), use the truenas-middleware skill to list
+the live `vm.*` / `virt.*` / `container.*` methods and read their schemas instead
+of guessing. Confirm before any start/stop/create/update/delete.
