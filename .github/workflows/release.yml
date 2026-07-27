@@ -1,0 +1,115 @@
+name: Release
+
+# Cuts a GitHub release when HH_VERSION in bin/hh changes on main, so merging
+# the version bump is all it takes. Notes come from the matching CHANGELOG.md
+# anchor section, which is why the anchor, the tag, and HH_VERSION are kept in
+# sync (see "Linking to a release" in CHANGELOG.md).
+#
+# Safe to re-run: if the tag is already released it exits without doing
+# anything. Can also be triggered by hand from the Actions tab.
+
+on:
+  push:
+    branches: [main]
+    paths: ['bin/hh']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the version out of bin/hh
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^HH_VERSION="\(.*\)"$/\1/p' bin/hh | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error file=bin/hh::could not read HH_VERSION"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "anchor=v${version//./-}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Detected version $version"
+
+      - name: Skip if this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version.outputs.tag }} is already released, nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Syntax check the scripts before shipping them
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            if bash -n "$f" 2>/tmp/syntax.err; then
+              echo "ok    $f"
+            else
+              echo "::error file=$f::syntax error"
+              cat /tmp/syntax.err
+              fail=1
+            fi
+          done < <(git ls-files 'bin/*' '*.sh')
+          exit "$fail"
+
+      - name: Pull the release notes out of CHANGELOG.md
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          anchor='${{ steps.version.outputs.anchor }}'
+          # Everything between this version's anchor and the next one, minus the
+          # leading blank lines and the "## X.Y.Z (date)" heading (the release
+          # title already says the version).
+          awk -v anchor="id=\"$anchor\"" '
+            index($0, anchor)                        { found=1; next }
+            found && /^<a id="v/                     { exit }
+            found && !started && /^## /              { started=1; next }
+            found && !started && /^[[:space:]]*$/    { next }
+            found                                    { print }
+          ' CHANGELOG.md > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "::error file=CHANGELOG.md::no section found for anchor $anchor"
+            echo "Add an <a id=\"$anchor\"></a> section before releasing."
+            exit 1
+          fi
+
+          {
+            echo
+            echo "---"
+            echo "Full notes: [CHANGELOG.md#$anchor](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md#$anchor)"
+          } >> notes.md
+
+          echo "Release notes ($(wc -l < notes.md) lines):"
+          cat notes.md
+
+      - name: Create the tag and publish the release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file notes.md
+          echo "Published ${{ steps.version.outputs.tag }}"
