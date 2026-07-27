@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-HH_VERSION="1.1.0"
+HH_VERSION="1.1.1"
 REG_DIR="/etc/homelabhero/hosts.d"
 VAULT_DIR="/etc/homelabhero/vault"
 VAULT_USER="hhvault"
@@ -64,12 +64,23 @@ EOF
 # never needs sudo, so it is not prefixed.
 VITALS_NIX="uptime -p 2>/dev/null || uptime; free -h | grep -i '^Mem'; df -h / | tail -1"
 _inv_proxmox() { local p="$1"; echo "echo '# VMs'; ${p}qm list; echo; echo '# LXCs'; ${p}pct list; echo; echo '# Storage'; ${p}pvesm status"; }
-# Compact name/type/state table for TrueNAS guests. Handles both API shapes:
-# virt.instance.query (Incus, 25.04/25.10) has status as a string and a type of
-# CONTAINER or VM; vm.query (libvirt, 24.10 and 26) has status as {state: ...}
-# and no type. Missing method or bad JSON prints nothing (stderr discarded).
-_TN_GUEST_FMT='import json,sys;[print("%-22s %-10s %s" % (i.get("name","?"), i.get("type","VM"), i["status"]["state"] if isinstance(i.get("status"),dict) else i.get("status","?"))) for i in json.load(sys.stdin)]'
-_inv_truenas() { local p="$1"; echo "echo '# Pools'; ${p}zpool list; echo; echo '# Docker'; ${p}docker ps 2>/dev/null; echo; echo '# Apps'; midclt call app.query 2>/dev/null | head -c 3000; echo; echo '# VMs / LXCs'; { midclt call virt.instance.query 2>/dev/null | python3 -c '${_TN_GUEST_FMT}' 2>/dev/null; midclt call vm.query 2>/dev/null | python3 -c '${_TN_GUEST_FMT}' 2>/dev/null; } | head -40"; }
+# Compact tables for the TrueNAS middleware queries, so they read like the
+# Proxmox qm/pct output instead of a wall of JSON.
+#
+# Both formatters take the raw midclt response on stdin and stay quiet when it
+# is empty, which is the normal case for a namespace this version does not have
+# (midclt writes that error to stderr, which the caller discards). If a response
+# arrives that is NOT a JSON array, they say so rather than printing nothing:
+# a silently empty section is indistinguishable from "nothing is running", and
+# that is exactly the kind of blind spot this reporting exists to remove.
+#
+# Guests handle two API shapes: virt.instance.query (Incus, 25.04/25.10) has
+# status as a string and a type of CONTAINER or VM; vm.query (libvirt, 24.10 and
+# 26) has status as {state: ...} and no type.
+_TN_UNEXPECTED='[print("(unexpected response: "+raw[:60]+")") for _ in [1] if raw and raw[:1]!="["]'
+_TN_GUEST_FMT='import json,sys;raw=sys.stdin.read().strip();d=json.loads(raw) if raw[:1]=="[" else [];[print("%-22s %-10s %s" % (i.get("name","?"), i.get("type","VM"), i["status"]["state"] if isinstance(i.get("status"),dict) else i.get("status","?"))) for i in d];'"${_TN_UNEXPECTED}"
+_TN_APP_FMT='import json,sys;raw=sys.stdin.read().strip();d=json.loads(raw) if raw[:1]=="[" else [];[print("%-22s %-10s %s" % (i.get("name","?"), i.get("state","?"), i.get("version",""))) for i in d];'"${_TN_UNEXPECTED}"
+_inv_truenas() { local p="$1"; echo "echo '# Pools'; ${p}zpool list; echo; echo '# Docker'; ${p}docker ps 2>/dev/null; echo; echo '# Apps'; midclt call app.query 2>/dev/null | python3 -c '${_TN_APP_FMT}' | head -40; echo; echo '# VMs / LXCs'; { midclt call virt.instance.query 2>/dev/null | python3 -c '${_TN_GUEST_FMT}'; midclt call vm.query 2>/dev/null | python3 -c '${_TN_GUEST_FMT}'; } | head -40"; }
 _inv_linux()   { local p="$1"; echo "echo '# Containers'; command -v docker >/dev/null 2>&1 && ${p}docker ps || echo '(no docker)'; echo; echo -n '# Running services: '; systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | wc -l; echo; echo '# Libvirt'; command -v virsh >/dev/null 2>&1 && ${p}virsh list --all || echo '(no libvirt)'"; }
 
 # Privilege prefix for a host. Root => empty (runs bare). A non-root connect user
