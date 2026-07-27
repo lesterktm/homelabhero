@@ -427,7 +427,7 @@ main() {
     update)    cmd_update "$@" ;;
     login)     cmd_login "$@" ;;
     audit)     cmd_audit "$@" ;;
-    version|--version|-V) echo "hh (HomelabHero) ${HH_VERSION}" ;;
+    version|--version|-V) echo "hh (HomelabHero) ${HH_VERSION}"; echo "What changed: https://github.com/serversathome/homelabhero/blob/main/CHANGELOG.md" ;;
     ''|-h|--help|help) usage ;;
     *) die "unknown command: ${sub} (try: hh help)" ;;
   esac
