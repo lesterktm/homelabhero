@@ -19,11 +19,25 @@ skill. Do not fix blindly from here. Localize first.
 
 ## Step 1: get the wide view
 
-Run the overview sweep. It is read-only and safe.
+Run both sweeps. They are read-only and safe.
 
-    hh overview
+    hh overview      # vitals: uptime, memory, root disk, pool verdict
+    hh inventory     # what is RUNNING: VMs, LXCs, containers, apps
 
-If you need the raw inventory first, `hh list` shows every registered host. To
+Run `hh inventory` too, not just `hh overview`. Overview reports vitals only and
+lists no guests on any platform, so a VM or LXC that is stopped, crashed, or
+failed to start after an upgrade is invisible to it. A "state of the homelab"
+answer is not complete until guest state is included for BOTH hypervisor-ish
+hosts: Proxmox (`qm list` VMs, `pct list` LXCs) and TrueNAS (VMs and LXCs via
+`virt.instance.query` on 25.04/25.10, `vm.query` on 24.10 and 26). `hh inventory`
+already does both automatically.
+
+Call out anything not running by name. A stopped guest is a finding, not
+background noise, especially on a TrueNAS host recently upgraded to 26, where
+the Incus-to-libvirt migration is known to leave instances behind (see the
+gotchas in infra/truenas.md).
+
+If you need the raw host list first, `hh list` shows every registered host. To
 spot-check one, `hh run <alias> "uptime; df -h /"`.
 
 ### Health check: never green without the kernel log
