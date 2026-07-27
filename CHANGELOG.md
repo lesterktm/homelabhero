@@ -9,7 +9,24 @@ command, MINOR for new functionality, PATCH for fixes.
 To move between versions, re-run the installer (see README). `hh update` pulls
 the latest and needs no manual migration for any release below.
 
-## 1.1.0
+## Linking to a release
+
+Every version heading carries a stable anchor of the form
+`v<major>-<minor>-<patch>`, so a GitHub release body, an issue, or a commit can
+link straight to the notes instead of duplicating them:
+
+    https://github.com/serversathome/homelabhero/blob/main/CHANGELOG.md#v1-1-0
+
+The anchor is written explicitly rather than relying on the heading text,
+because GitHub strips the dots out of `## 1.1.0` and generates `#110`, which is
+easy to get wrong and changes if a date is added to the heading.
+
+When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
+tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
+
+<a id="v1-1-0"></a>
+
+## 1.1.0 (2026-07-27)
 
 TrueNAS VMs and LXC containers now show up in the inventory, at parity with how
 Proxmox guests have always been reported.
@@ -62,7 +79,9 @@ Proxmox guests have always been reported.
   `vm`, those containers will not be listed yet. Confirm the real name on a 26
   box with the `core.get_methods` probe documented in `capabilities/truenas.md`.
 
-## 1.0.0
+<a id="v1-0-0"></a>
+
+## 1.0.0 (2026-07-18)
 
 Initial release. One command turns a fresh LXC into a homelab command center:
 Claude Code plus a web UI, preloaded skills for TrueNAS, Proxmox, Docker, and
