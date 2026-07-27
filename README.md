@@ -73,6 +73,13 @@ after which `hh update` maintains it:
     apt update && apt install -y curl && \
       curl -fsSL https://raw.githubusercontent.com/serversathome/homelabhero/main/install.sh | bash
 
+To see which version you are on and what changed between releases:
+
+    hh version
+
+[CHANGELOG.md](CHANGELOG.md) explains every release: what was added, what
+changed, and anything worth knowing before you update.
+
 
 ## Commands
 
