@@ -100,7 +100,7 @@ changed, and anything worth knowing before you update.
     hh update                    update everything now: HomelabHero + OS (operator)
     hh login                     log Claude Code in as the agent user
     hh audit [lines]             review the broker audit log (operator)
-    hh version                   print the HomelabHero version
+    hh version                   print the version and a link to the changelog
 
 ## The idea
 
@@ -145,9 +145,9 @@ you type never pass through an LLM-driven session.
 
 - Full platform capability catalogs (`ops/capabilities/`) for Proxmox, TrueNAS, and
   Linux, so Claude uses the whole toolset of each system, not just the basics.
-- Live inventory via `hh inventory`: Proxmox VMs and LXCs, TrueNAS apps and pools,
-  and Docker containers wherever they run. `hh inventory --save` snapshots into
-  `ops/inventory/` so state changes show up in git over time.
+- Live inventory via `hh inventory`: Proxmox VMs and LXCs, TrueNAS VMs, LXCs,
+  apps and pools, and Docker containers wherever they run. `hh inventory --save`
+  snapshots into `ops/inventory/` so state changes show up in git over time.
 - Environment-specific notes about your setup in `ops/infra/`.
 
 ## Discovery (point and click)
@@ -184,8 +184,9 @@ file to change the schedule, or delete it to turn auto-update off. Run it any ti
 
 ### Staying up to date with HomelabHero itself
 
-For step 1, `hh update` `git pull`s the release you installed from and **re-runs the
-installer non-interactively** - so an update produces exactly what a fresh install does:
+For step 1, `hh update` `git pull`s the branch you installed from (`main` unless you
+changed it) and **re-runs the installer non-interactively** - so an update produces
+exactly what a fresh install does:
 the `hh` CLI and broker, the shipped skills / `CLAUDE.md` / capability docs, Node and
 npm at the latest LTS, the Claude Code + claudecodeui packages (reinstalled with the
 correct `--allow-scripts` set so their native modules always build), and the systemd
@@ -249,6 +250,11 @@ auto-update runs it for you after each update.
 - Hosts are reached as root by default, so commands run directly with no sudo. On
   TrueNAS you can connect as `truenas_admin` instead (pass it to `hh provision`);
   `midclt` reaches the middleware and covers most TrueNAS work regardless.
+- TrueNAS changed its VM engine twice (libvirt through 24.10, Incus on 25.04 and
+  25.10, back to libvirt on 26), and the middleware method names moved with it.
+  Inventory queries both namespaces, so VMs and LXCs are listed on any of them
+  with nothing to configure. On 26, which is still beta, LXC containers may not
+  be listed yet if they sit under a namespace neither of those covers.
 - No MCP servers and no Grafana/Prometheus. The whole surface is SSH plus the
   capability catalogs, kept simple on purpose.
 
