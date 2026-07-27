@@ -24,6 +24,26 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-1-1"></a>
+
+## 1.1.1 (2026-07-27)
+
+### Changed
+
+- TrueNAS apps are formatted as a name/state/version table in `hh inventory`,
+  the same treatment VMs and LXCs got in 1.1.0. They were still printing as raw
+  JSON truncated at 3000 characters, so a box with a dozen apps produced an
+  unreadable blob, and an empty app list printed a bare `[]`.
+
+### Fixed
+
+- An unreadable middleware response is now reported instead of silently
+  producing an empty section. Previously any parse failure was swallowed, so a
+  changed API shape would look identical to "nothing is running", which is the
+  exact blind spot this reporting exists to remove. A namespace the running
+  version does not have is still quiet, since that is normal and expected rather
+  than a fault.
+
 <a id="v1-1-0"></a>
 
 ## 1.1.0 (2026-07-27)
