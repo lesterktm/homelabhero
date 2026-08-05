@@ -21,6 +21,25 @@ problem.
 - NetBird network CIDR: `<...>`
 - Which services sit behind Cloudflare Tunnels: `<...>`
 
+## Asking the gateway directly
+
+If the UniFi console is registered (check `hh list` for platform `unifi`), it
+answers most network questions itself, faster and more completely than probing
+from a host:
+
+    hh unifi summary                 # WAN, internet, LAN, WiFi, devices, clients
+    hh unifi devices                 # every AP and switch, with state and firmware
+    hh unifi clients                 # who is actually connected, and how
+    hh unifi networks                # configured networks and VLAN IDs
+
+This is READ-ONLY. It reports on the gateway, switches, and access points; it
+cannot change any of them. Configuration changes are made by hand in the UniFi
+app. See the unifi-ops skill and `capabilities/unifi.md`.
+
+Not registered yet? An admin adds it from a shell with `hh add-unifi`. It needs
+a UniFi API key, minted under a View Only admin, which is why it cannot be done
+from the chat.
+
 ## Reachability checks
 
     ping -c3 <host-mesh-ip>

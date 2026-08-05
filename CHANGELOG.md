@@ -24,6 +24,78 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-2-0"></a>
+
+## 1.2.0 (2026-08-05)
+
+Your router joins the homelab. HomelabHero can now discover a UniFi console
+during setup and read it over its local API, so the gateway stops being the one
+piece of the network Claude has to guess about.
+
+It is **read-only** and cannot be talked out of it. Reading the router is
+enormously useful; letting an agent write to it is not, because the router is
+the one device whose failure takes away the access you would need to fix it.
+
+### Added
+
+- `hh scan` looks for your router. Anything at the default gateway or at the
+  `.1` of the subnet (`192.168.1.1`, `10.99.0.1`) is fingerprinted, and a UniFi
+  console is identified by name and version through its unauthenticated status
+  endpoint, falling back to its TLS certificate. The results table gained a
+  `ROLE` column, and a found router is called out by name, since it is the one
+  device nobody thinks of as "a server to add".
+- `hh add-unifi` registers a UniFi console with an API key. Offered directly
+  from `hh scan --add` and from step 10 of the installer, so the normal path is
+  simply to accept it during setup. Operator- and shell-only, like password
+  auth: an API key is a secret being typed, and a secret typed into a chat
+  session has already been seen by the LLM.
+- `hh unifi <op> [alias]` reads the console: `summary`, `health`, `devices`,
+  `clients`, `networks`, `info`, `sites`, `device`, `stats`, `ping`, and a
+  read-only `get` escape hatch for any other path under `/proxy/network/`
+  (`{site}` and `{siteName}` are substituted for you). The alias may be omitted
+  when only one console is registered, which is the usual case.
+- `hh overview` and `hh inventory` include the console: WAN and internet health,
+  LAN and WiFi status, adopted devices with firmware state, and client counts.
+  `hh doctor` and `hh test` check it too.
+- A `unifi-ops` skill and a `capabilities/unifi.md` catalog, plus gateway-first
+  guidance in `network-diag` and `infra/network.md`. An offline switch or access
+  point explains every host behind it, so checking the fabric first saves
+  troubleshooting those hosts one at a time.
+- `hh repin <alias>` re-pins a console's TLS public key after you legitimately
+  change its certificate.
+
+### Security
+
+- **Read-only in three independent places.** The `hh-unifi` broker issues HTTP
+  `GET` and has no code path that can `POST`, `PUT`, `PATCH`, or `DELETE`, so no
+  prompt and no jailbreak can reconfigure the network through it. Registration
+  tells you to mint the key under a **View Only** UniFi admin, so the console
+  refuses writes on its own. The ops brain and the skill state the rule plainly
+  and redirect to "tell the user what to change, then read it back to confirm".
+- The API key never reaches the agent. It lives in the vault (mode 600,
+  `hhvault`), and `hh-unifi` hands it to curl through a config file on stdin
+  rather than a command-line header, so it never appears in `/proc`, which is
+  world readable and would otherwise expose it to the very user the vault exists
+  to keep it from.
+- The console's TLS public key is pinned on first contact (trust on first use,
+  like SSH's `accept-new`) and verified on every later call. A UniFi console
+  ships a self-signed certificate, so ordinary CA validation cannot apply; a
+  changed certificate now fails closed with instructions rather than quietly
+  trusting a new identity.
+- `hh-connect` refuses an API-key host with a pointer to `hh unifi`, and
+  `hh-provision` refuses to register one at all, so there is no path from the
+  chat to a stored credential.
+
+### Fixed
+
+- Registry values may now contain `=`. Both brokers split on the first `=` by
+  hand instead of using `IFS='='`, which silently dropped a trailing `=` and so
+  truncated the base64 padding of a pinned key into one that could never match.
+- `hh scan` no longer aborts when the default route cannot be read. With
+  `pipefail`, a missing `ip` or an LXC with no default route turned a lookup
+  that is allowed to fail into a fatal one, and the scan produced nothing at
+  all.
+
 <a id="v1-1-1"></a>
 
 ## 1.1.1 (2026-07-27)

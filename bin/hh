@@ -3,17 +3,19 @@
 # hh - HomelabHero control CLI.
 #
 # Agent-safe (read-only, used by Claude): list, run, test, overview, inventory,
-#   scan, doctor.
-# Operator (need sudo, run from an admin shell): add-host, rm-host, update, login.
+#   scan, doctor, unifi (read ops).
+# Operator (need sudo, run from an admin shell): add-host, add-unifi, rm-host,
+#   repin, update, login.
 #
 set -euo pipefail
 
-HH_VERSION="1.1.1"
+HH_VERSION="1.2.0"
 REG_DIR="/etc/homelabhero/hosts.d"
 VAULT_DIR="/etc/homelabhero/vault"
 VAULT_USER="hhvault"
 AGENT_USER="hhagent"
 BROKER="/usr/local/bin/hh-connect"
+UNIFI_BROKER="/usr/local/bin/hh-unifi"
 UPDATER="/usr/local/bin/hh-update"
 UPDATE_LOG="/var/log/homelabhero-update.log"
 BROKER_LOG="/var/log/homelabhero-broker.log"
@@ -37,6 +39,11 @@ HomelabHero
                                  add --save to snapshot into inventory/
   hh scan [cidr]               discover live hosts on the network (read-only)
                                  add --add to pick and register them (operator)
+  hh unifi <op> [alias] [args] read your UniFi router/console over its API.
+                                 READ-ONLY: it can never change your network.
+                                 ops: summary ping info sites devices device
+                                      stats clients networks health get
+                                 alias may be omitted with one console
   hh doctor                    check the whole setup is healthy
   hh diff [alias]              inventory drift vs the last saved snapshot
   hh provision <alias> <host> [port] [platform] [user]
@@ -46,6 +53,10 @@ HomelabHero
                                truenas_admin, else root); or pass user@host
 
   hh add-host                  register a host (operator, needs sudo)
+  hh add-unifi                 register a UniFi router/console with a View Only
+                               API key (operator, needs sudo)
+  hh repin <alias>             re-pin a UniFi console's TLS key after you
+                               changed its certificate (operator, needs sudo)
   hh rm-host <alias>           remove a host and its credential
   hh update                    update EVERYTHING now - HomelabHero (code, skills,
                                Node), then the OS packages (operator, needs sudo;
@@ -82,6 +93,56 @@ _TN_GUEST_FMT='import json,sys;raw=sys.stdin.read().strip();d=json.loads(raw) if
 _TN_APP_FMT='import json,sys;raw=sys.stdin.read().strip();d=json.loads(raw) if raw[:1]=="[" else [];[print("%-22s %-10s %s" % (i.get("name","?"), i.get("state","?"), i.get("version",""))) for i in d];'"${_TN_UNEXPECTED}"
 _inv_truenas() { local p="$1"; echo "echo '# Pools'; ${p}zpool list; echo; echo '# Docker'; ${p}docker ps 2>/dev/null; echo; echo '# Apps'; midclt call app.query 2>/dev/null | python3 -c '${_TN_APP_FMT}' | head -40; echo; echo '# VMs / LXCs'; { midclt call virt.instance.query 2>/dev/null | python3 -c '${_TN_GUEST_FMT}'; midclt call vm.query 2>/dev/null | python3 -c '${_TN_GUEST_FMT}'; } | head -40"; }
 _inv_linux()   { local p="$1"; echo "echo '# Containers'; command -v docker >/dev/null 2>&1 && ${p}docker ps || echo '(no docker)'; echo; echo -n '# Running services: '; systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | wc -l; echo; echo '# Libvirt'; command -v virsh >/dev/null 2>&1 && ${p}virsh list --all || echo '(no libvirt)'"; }
+
+# ---- UniFi (API-key hosts) --------------------------------------------------
+#
+# A UniFi console is registered like any other host but is reached over its
+# local HTTPS API instead of SSH, so everything that would shell into a host has
+# to route around it. These helpers are how the rest of the CLI asks "is this
+# one of those?" without duplicating the answer in six places.
+
+_is_unifi() { [ -f "${REG_DIR}/$1.conf" ] && [ "$(conf_get "${REG_DIR}/$1.conf" AUTH)" = "apikey" ]; }
+unifi_broker() { sudo -n -H -u "$VAULT_USER" "$UNIFI_BROKER" "$@"; }
+
+_unifi_aliases() { shopt -s nullglob; for f in "$REG_DIR"/*.conf; do
+  local a; a="$(basename "$f" .conf)"; _is_unifi "$a" && printf '%s\n' "$a"; done; }
+
+# Resolve which console a command means. Nearly every homelab has exactly one
+# router, so naming it every time is friction with no benefit; require the alias
+# only when there is a real choice to make.
+_unifi_default() {
+  local list; list="$(_unifi_aliases)"
+  case "$(printf '%s' "$list" | grep -c .)" in
+    0) die "no UniFi console registered yet. Register one from an admin shell: hh add-unifi" ;;
+    1) printf '%s' "$list" ;;
+    *) die "more than one UniFi console registered; name which one: $(printf '%s' "$list" | tr '\n' ' ')" ;;
+  esac
+}
+
+cmd_unifi() {
+  local op="${1:-}"; shift || true
+  [ -n "$op" ] || die "usage: hh unifi <op> [alias] [args]  (ops: summary ping info sites devices device stats clients networks health get)"
+  # The alias is optional and sits after the op. Consume it only if the next
+  # argument actually names a registered console, so `hh unifi devices` and
+  # `hh unifi devices gw` both do the obvious thing.
+  local alias=""
+  if [ -n "${1:-}" ] && _is_unifi "${1}"; then alias="$1"; shift; else alias="$(_unifi_default)"; fi
+  exec sudo -n -H -u "$VAULT_USER" "$UNIFI_BROKER" "$op" "$alias" "$@"
+}
+
+# Capture the console's TLS public key so later calls can verify they are still
+# talking to the same box (trust on first use, like SSH's accept-new). Prints a
+# curl --pinnedpubkey value, or nothing if it cannot be read.
+_unifi_pin() {
+  local host="$1" port="$2" pin
+  pin="$(echo | openssl s_client -connect "${host}:${port}" -servername "$host" 2>/dev/null \
+    | openssl x509 -pubkey -noout 2>/dev/null \
+    | openssl pkey -pubin -outform der 2>/dev/null \
+    | openssl dgst -sha256 -binary 2>/dev/null \
+    | openssl base64 2>/dev/null)" || true
+  pin="${pin//[[:space:]]/}"
+  [ -n "$pin" ] && printf 'sha256//%s' "$pin"
+}
 
 # Privilege prefix for a host. Root => empty (runs bare). A non-root connect user
 # => "sudo -n " but ONLY if that user has passwordless sudo, probed once per run
@@ -122,6 +183,12 @@ cmd_run() {
 
 cmd_test() {
   [ "$#" -eq 1 ] || die "usage: hh test <alias>"
+  if _is_unifi "$1"; then
+    local out
+    if out="$(unifi_broker ping "$1" 2>&1)"; then echo "OK: $1 reachable ($out)"
+    else echo "FAIL: $1 not reachable"; printf '%s\n' "$out" | sed 's/^/  /'; return 1; fi
+    return 0
+  fi
   if broker "$1" 'echo homelabhero-ok' 2>/dev/null | grep -q homelabhero-ok; then
     echo "OK: $1 reachable"
   else
@@ -139,6 +206,16 @@ cmd_overview() {
   for f in "${files[@]}"; do
     local a plat; a="$(basename "$f" .conf)"; plat="$(conf_get "$f" PLATFORM)"
     printf -- '---------------------------------------------\n## %s (%s)\n' "$a" "$plat"
+    # A UniFi console has no shell to sweep; its vitals are WAN/LAN/WiFi health,
+    # which is what the summary op reports. Capture first, then decide: piping
+    # straight to sed would print the broker's error text and the UNREACHABLE
+    # line, which reads like two different failures.
+    if _is_unifi "$a"; then
+      local uout
+      if uout="$(unifi_broker summary "$a" 2>/dev/null)"; then printf '%s\n' "$uout" | sed 's/^/  /'
+      else echo "  UNREACHABLE"; fi
+      continue
+    fi
     if ! broker "$a" 'true' 2>/dev/null; then echo "  UNREACHABLE"; continue; fi
     broker "$a" "$VITALS_NIX" 2>/dev/null | sed 's/^/  /' || true
     [ "$plat" = "truenas" ] && { echo -n "  zpool: "; broker "$a" "$(_priv "$a")zpool status -x" 2>/dev/null; }
@@ -149,6 +226,16 @@ cmd_overview() {
 _inventory_one() {
   local a plat; a="$1"; plat="$(_platform_of "$a")"
   printf -- '=============================================\n# %s (%s)\n' "$a" "$plat"
+  # "What is running" on the router means the gear it has adopted (APs,
+  # switches, the gateway itself) plus how many clients are on the network.
+  if _is_unifi "$a"; then
+    local uout
+    uout="$(unifi_broker summary "$a" 2>/dev/null)" || { echo "UNREACHABLE"; return; }
+    printf '%s\n' "$uout"
+    echo
+    uout="$(unifi_broker devices "$a" 2>/dev/null)" && printf '%s\n' "$uout"
+    return
+  fi
   if ! broker "$a" 'true' 2>/dev/null; then echo "UNREACHABLE"; return; fi
   local p; p="$(_priv "$a")"
   case "$plat" in
@@ -200,6 +287,57 @@ cmd_diff() {
 
 _registered_ips() { shopt -s nullglob; for f in "$REG_DIR"/*.conf; do conf_get "$f" HOST; done; }
 
+# The address this box actually routes through. More reliable than guessing,
+# and it is what makes "found your router" a statement rather than a hunch.
+#
+# Never fails: not knowing the default route is a normal state (an isolated LXC
+# may have none) and only costs us one of two gateway hints, so it must not be
+# able to abort a scan. The explicit `|| true` matters because pipefail would
+# otherwise surface a missing `ip` as a fatal pipeline failure.
+_default_gw() {
+  ip route show default 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' || true
+}
+
+# Is this IP the router? Either it is literally our default route, or it sits at
+# the .1 of its subnet, which is where a home gateway lives often enough to be
+# worth probing even when this box routes somewhere else (a scan of a subnet we
+# are not on, a double-NAT lab, a VLAN with its own gateway).
+_looks_like_gateway() {
+  local ip="$1" gw="$2"
+  [ -n "$gw" ] && [ "$ip" = "$gw" ] && return 0
+  case "$ip" in *.1) return 0 ;; esac
+  return 1
+}
+
+# Fingerprint a UniFi console without credentials. Echoes "<how> <version>" on a
+# match. Ordered most to least certain: the Network application answers an
+# unauthenticated status probe with its version, which is proof; the TLS
+# certificate is only a strong hint, so it is the last resort rather than the
+# first check.
+_unifi_probe() {
+  local ip="$1" body ver
+  local url
+  for url in "https://${ip}/proxy/network/status" "https://${ip}/status" "https://${ip}:8443/status"; do
+    body="$(curl -sk -m 3 "$url" 2>/dev/null || true)"
+    case "$body" in
+      *server_version*)
+        ver="$(printf '%s' "$body" | jq -r '.meta.server_version // empty' 2>/dev/null || true)"
+        case "$url" in
+          *:8443/status) printf 'controller %s' "${ver:-?}" ;;
+          *)             printf 'console %s' "${ver:-?}" ;;
+        esac
+        return 0 ;;
+    esac
+  done
+  body="$(echo | openssl s_client -connect "${ip}:443" -servername "$ip" 2>/dev/null \
+    | openssl x509 -noout -subject -issuer 2>/dev/null || true)"
+  case "$body" in
+    *UniFi*|*Ubiquiti*|*unifi*|*ubnt*) printf 'certificate ?'; return 0 ;;
+  esac
+  return 1
+}
+
 cmd_scan() {
   local add=0 cidr=""
   for arg in "$@"; do case "$arg" in --add) add=1 ;; *) cidr="$arg" ;; esac; done
@@ -207,7 +345,9 @@ cmd_scan() {
   [ -n "$cidr" ] || die "could not detect a subnet; pass one, e.g. hh scan 10.0.0.0/24"
   echo "Scanning ${cidr} for management endpoints..." >&2
 
-  local ports="22,80,443,445,8006"
+  # 8443 is the legacy self-hosted UniFi Network application; a UniFi OS console
+  # (UDM, UCG, Cloud Key) answers on 443 like everything else.
+  local ports="22,80,443,445,8006,8443"
   declare -a IPS PORTLIST
   if command -v nmap >/dev/null 2>&1; then
     while read -r ip openports; do
@@ -220,29 +360,65 @@ cmd_scan() {
     local base="${cidr%/*}"; base="${base%.*}"
     for n in $(seq 1 254); do
       local ip="${base}.${n}" open=""
-      for p in 22 8006 443 445 80; do
+      for p in 22 8006 443 445 80 8443; do
         timeout 1 bash -c "exec 3<>/dev/tcp/${ip}/${p}" 2>/dev/null && open="${open}${p} "
       done
       [ -n "$open" ] && { IPS+=("$ip"); PORTLIST+=("${open% }"); }
     done
   fi
 
-  local regips; regips="$(_registered_ips | tr '\n' ' ')"
-  printf '\n%-4s %-16s %-16s %-16s %s\n' '#' 'IP' 'OPEN PORTS' 'GUESS' 'REGISTERED?'
-  local i=0
+  local regips gw; regips="$(_registered_ips | tr '\n' ' ')"; gw="$(_default_gw)"
+  # Remember, per row, which entries are a confirmed UniFi console, so the
+  # picker below can offer the API-key path instead of asking for SSH details
+  # that a router does not have.
+  declare -a UNIFI
+  printf '\n%-4s %-16s %-20s %-16s %-9s %s\n' '#' 'IP' 'OPEN PORTS' 'GUESS' 'ROLE' 'REGISTERED?'
+  local i=0 found_unifi=""
   for idx in "${!IPS[@]}"; do
     i=$((i+1))
-    local ip="${IPS[$idx]}" op="${PORTLIST[$idx]}" guess reg="new"
+    local ip="${IPS[$idx]}" op="${PORTLIST[$idx]}" guess reg="new" role="" uni=""
     case " ${op//,/ } " in
       *" 8006 "*) guess="proxmox" ;;
       *" 443 "*)  guess="truenas?/linux" ;;
       *" 22 "*)   guess="linux" ;;
       *)          guess="?" ;;
     esac
+    # Probe for UniFi only where it could plausibly be one, so a full subnet
+    # sweep does not pay for a handful of HTTPS round trips per host.
+    local maybe_unifi=1
+    _looks_like_gateway "$ip" "$gw" && { role="gateway"; maybe_unifi=0; }
+    case " ${op//,/ } " in *" 8443 "*) maybe_unifi=0 ;; esac
+    if [ "$maybe_unifi" -eq 0 ] && uni="$(_unifi_probe "$ip")"; then
+      guess="unifi"; UNIFI[$idx]="$uni"
+      [ -n "$found_unifi" ] || found_unifi="$i"
+    fi
     case " $regips " in *" $ip "*) reg="registered" ;; esac
-    printf '%-4s %-16s %-16s %-16s %s\n' "$i" "$ip" "${op// /,}" "$guess" "$reg"
+    printf '%-4s %-16s %-20s %-16s %-9s %s\n' "$i" "$ip" "${op// /,}" "$guess" "${role:--}" "$reg"
   done
   [ "$i" -gt 0 ] || { echo "No endpoints found."; return 0; }
+
+  # Call the router out by name. It is the one device on this list a person may
+  # not think of as "a server to add", and it is the one that explains the most
+  # about why everything else is or is not working.
+  if [ -n "$found_unifi" ]; then
+    local uidx=$((found_unifi-1)) ukind uver udesc
+    ukind="${UNIFI[$uidx]%% *}"; uver="${UNIFI[$uidx]#* }"
+    case "$ukind" in
+      console)     udesc="UniFi OS console running Network ${uver}" ;;
+      controller)  udesc="self-hosted UniFi Network application ${uver} on port 8443" ;;
+      *)           udesc="UniFi device (identified by its TLS certificate)" ;;
+    esac
+    cat <<EOF
+
+Found your router: a ${udesc} at ${IPS[$uidx]}  (number ${found_unifi} above).
+Adding it lets Claude see WAN and internet health, every adopted access point
+and switch, connected clients, and pending firmware, so "the internet is down"
+and "wifi is slow" become answerable instead of guesswork.
+
+It connects with a UniFi API key, not SSH, and HomelabHero only ever READS from
+it. It cannot change your network, by design.
+EOF
+  fi
 
   if [ "$add" -eq 1 ]; then
     # Registering hosts writes the registry and generates keys: an operator
@@ -257,15 +433,24 @@ cmd_scan() {
       n="${n// /}"; [[ "$n" =~ ^[0-9]+$ ]] || continue
       local idx=$((n-1)); [ -n "${IPS[$idx]:-}" ] || continue
       local ip="${IPS[$idx]}" op="${PORTLIST[$idx]}" plat=linux
+      # A confirmed UniFi console is not an SSH host at all, so it skips the
+      # platform question entirely rather than offering choices that do not
+      # apply to it.
+      if [ -n "${UNIFI[$idx]:-}" ]; then
+        echo; echo "Registering ${ip} as your UniFi router ..."
+        cmd_add_host --host "$ip" --port 443 --platform unifi
+        continue
+      fi
       # Guess from open ports, then let the operator confirm or correct it
       # (443 alone is often TrueNAS, but just as often a plain Linux web host).
       case " ${op//,/ } " in
         *" 8006 "*) plat=proxmox ;;
         *" 443 "*)  plat=truenas ;;
       esac
-      plat="$(ask "Platform for ${ip} (linux/truenas/proxmox)" "$plat")"
+      plat="$(ask "Platform for ${ip} (linux/truenas/proxmox/unifi)" "$plat")"
       echo; echo "Registering ${ip} as ${plat} ..."
-      cmd_add_host --host "$ip" --port 22 --platform "$plat"
+      if [ "$plat" = "unifi" ]; then cmd_add_host --host "$ip" --port 443 --platform unifi
+      else cmd_add_host --host "$ip" --port 22 --platform "$plat"; fi
     done
   else
     echo; echo "To register: hh scan ${cidr} --add   (or: hh add-host)"
@@ -283,6 +468,7 @@ cmd_doctor() {
   id "$AGENT_USER" >/dev/null 2>&1 && ok "agent user ${AGENT_USER} exists" || bad "missing user ${AGENT_USER}"
   id "$VAULT_USER" >/dev/null 2>&1 && ok "vault user ${VAULT_USER} exists" || bad "missing user ${VAULT_USER}"
   [ -x "$BROKER" ] && ok "broker installed" || bad "broker missing at ${BROKER}"
+  [ -x "$UNIFI_BROKER" ] && ok "unifi broker installed (read-only)" || note "unifi broker missing at ${UNIFI_BROKER} (run: hh update)"
   if [ -d "$VAULT_DIR" ]; then
     local perm; perm="$(stat -c '%a %U' "$VAULT_DIR" 2>/dev/null || true)"
     [ "$perm" = "700 ${VAULT_USER}" ] && ok "vault perms (${perm})" || note "vault perms are '${perm}', expected '700 ${VAULT_USER}'"
@@ -305,6 +491,16 @@ cmd_doctor() {
   [ "${#files[@]}" -eq 0 ] && note "no hosts registered yet (hh add-host)"
   for f in "${files[@]}"; do
     local a u; a="$(basename "$f" .conf)"; u="$(conf_get "$f" USER)"
+    if _is_unifi "$a"; then
+      if unifi_broker ping "$a" >/dev/null 2>&1; then
+        ok "reach ${a} (unifi API, read-only)"
+        [ -n "$(conf_get "$f" PIN)" ] || note "${a} has no TLS pin; re-pin it with: hh repin ${a}"
+      else
+        bad "cannot reach ${a} over the UniFi API (key rejected, console down, or cert changed)"
+        printf '           detail: %s\n' "$(unifi_broker ping "$a" 2>&1 | head -1)"
+      fi
+      continue
+    fi
     if ! broker "$a" 'echo ok' 2>/dev/null | grep -q ok; then bad "cannot reach ${a}"; continue; fi
     if [ "$u" = "root" ] || broker "$a" 'sudo -n true' >/dev/null 2>&1; then ok "reach ${a} (${u})"
     else
@@ -335,11 +531,18 @@ cmd_add_host() {
   esac; done
 
   [ "$(id -u)" -eq 0 ] || sudo -v || die "add-host needs sudo (run from an admin shell, not the Claude UI)"
-  [ -n "$alias" ] || alias="$(ask 'Alias (short name, e.g. pve1)')"
+  # Platform is settled before the alias so a UniFi console can suggest a
+  # sensible name and then skip every SSH question, which does not apply to it.
+  [ -n "$plat" ] || plat="$(ask 'Platform (linux/truenas/proxmox/unifi)' linux)"
+  case "$plat" in linux|truenas|proxmox|unifi) : ;; *) die "unknown platform: ${plat} (linux, truenas, proxmox, unifi)" ;; esac
+  if [ -z "$alias" ]; then
+    if [ "$plat" = "unifi" ]; then alias="$(ask 'Alias (short name for your router)' router)"
+    else alias="$(ask 'Alias (short name, e.g. pve1)')"; fi
+  fi
   [[ "$alias" =~ $NAME_RE ]] || die "invalid alias"
   [ -f "${REG_DIR}/${alias}.conf" ] && die "alias already registered"
-  [ -n "$plat" ] || plat="$(ask 'Platform (linux/truenas/proxmox)' linux)"
   [ -n "$host" ] || host="$(ask 'IP or hostname')"
+  if [ "$plat" = "unifi" ]; then _add_unifi_host "$alias" "$host" "${port:-443}"; return; fi
   [ -n "$port" ] || port="$(ask 'SSH port' 22)"
   ruser="$(ask 'Username' root)"
   auth="$(ask 'Auth method (key recommended / password)' key)"
@@ -378,6 +581,107 @@ EOF
   sudo chmod 644 "${REG_DIR}/${alias}.conf"
   echo "Registered '${alias}'. Testing..." >/dev/tty
   cmd_test "$alias" || true
+}
+
+# Register a UniFi console. Operator-only and shell-only, for the same reason
+# password auth is: an API key is a secret being typed, and a secret typed into
+# an LLM session has already been seen by the LLM. There is deliberately no
+# UI/agent path to this (nothing in hh-provision registers one).
+_add_unifi_host() {
+  local alias="$1" host="$2" port="$3" cred="${1}.apikey" key pin
+  cat >/dev/tty <<EOF
+
+Registering ${host} as a UniFi router.
+
+HomelabHero reads your UniFi console over its local API, which needs an API key.
+Create one in the UniFi Network app:
+
+  1. Settings -> Control Plane -> Integrations -> Create API Key
+     (older versions put it under Settings -> Admins, or Control Plane ->
+     Admins; the wording moved between Network 8, 9, and 10.)
+  2. Give it a name like "homelabhero" and copy the key. UniFi shows it once.
+
+  IMPORTANT: create the key under an admin whose role is VIEW ONLY.
+
+  The key inherits that admin's permissions, so a View Only admin produces a key
+  that physically cannot change your network - the console itself refuses the
+  write. HomelabHero never issues anything but reads either, so this is a second
+  lock on the same door. If you mint the key under a full admin instead, this
+  tool still will not write, but the key in the vault would be able to.
+
+  Requires a UniFi OS console (UDM, UCG, Cloud Key Gen2+, UniFi OS Server) on
+  Network 9.0 or newer. API keys do not exist on the old self-hosted app.
+
+EOF
+  key="$(asksecret "UniFi API key for ${host}")"
+  [ -n "$key" ] || die "no key entered"
+  printf '%s' "$key" | sudo -u "$VAULT_USER" tee "${VAULT_DIR}/${cred}" >/dev/null
+  sudo -u "$VAULT_USER" chmod 600 "${VAULT_DIR}/${cred}"
+  unset key
+
+  # Pin the console's TLS public key now, while we are talking to it for the
+  # first time and can reasonably assume the LAN is honest. Every later call
+  # verifies against this, which is what stops the key being handed to an
+  # impostor on the network later.
+  echo "Pinning the console's TLS key..." >/dev/tty
+  pin="$(_unifi_pin "$host" "$port" || true)"
+  [ -n "$pin" ] || echo "  (could not read the certificate; continuing unpinned)" >/dev/tty
+
+  sudo tee "${REG_DIR}/${alias}.conf" >/dev/null <<EOF
+# HomelabHero host registry entry (non-secret)
+PLATFORM=unifi
+HOST=${host}
+PORT=${port}
+USER=api-key
+AUTH=apikey
+CRED=${cred}
+PIN=${pin}
+EOF
+  sudo chmod 644 "${REG_DIR}/${alias}.conf"
+
+  echo >/dev/tty; echo "Registered '${alias}'. Testing..." >/dev/tty
+  if cmd_test "$alias"; then
+    # Resolve and cache the site id so the first real command is not slower
+    # than every one after it.
+    unifi_broker sites "$alias" >/dev/null 2>&1 || true
+    echo >/dev/tty
+    unifi_broker summary "$alias" 2>&1 | sed 's/^/  /' >/dev/tty || true
+  else
+    cat >/dev/tty <<EOF
+
+The key did not work. Nothing is broken; the registration is saved but unusable.
+Check that you copied the whole key and that the console is on Network 9.0+,
+then replace it:
+
+    hh rm-host ${alias}
+    hh add-unifi
+EOF
+  fi
+}
+
+cmd_add_unifi() {
+  [ "$(id -u)" -eq 0 ] || sudo -v || die "add-unifi needs sudo (run from an admin shell, not the Claude UI)"
+  cmd_add_host --platform unifi "$@"
+}
+
+# Re-pin after the console's certificate legitimately changes (a firmware
+# update, or installing your own cert). Separate and operator-only on purpose:
+# accepting a new key is exactly what an attacker would want, so it should be a
+# thing a person chooses to do, never something that happens quietly.
+cmd_repin() {
+  [ "$#" -eq 1 ] || die "usage: hh repin <alias>"
+  local alias="$1" f="${REG_DIR}/$1.conf"
+  [ -f "$f" ] || die "no such host"
+  _is_unifi "$alias" || die "'${alias}' is not a UniFi console"
+  [ "$(id -u)" -eq 0 ] || sudo -v || die "repin needs sudo (run from an admin shell, not the Claude UI)"
+  local host port pin
+  host="$(conf_get "$f" HOST)"; port="$(conf_get "$f" PORT)"
+  pin="$(_unifi_pin "$host" "${port:-443}" || true)"
+  [ -n "$pin" ] || die "could not read a certificate from ${host}:${port}"
+  sudo sed -i "/^PIN=/d" "$f"
+  printf 'PIN=%s\n' "$pin" | sudo tee -a "$f" >/dev/null
+  echo "Re-pinned ${alias} (${host})."
+  cmd_test "$alias"
 }
 
 cmd_rm_host() {
@@ -431,9 +735,12 @@ main() {
     inventory) cmd_inventory "$@" ;;
     diff)      cmd_diff "$@" ;;
     scan)      cmd_scan "$@" ;;
+    unifi)     cmd_unifi "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     provision) cmd_provision "$@" ;;
     add-host)  cmd_add_host "$@" ;;
+    add-unifi) cmd_add_unifi "$@" ;;
+    repin)     cmd_repin "$@" ;;
     rm-host)   cmd_rm_host "$@" ;;
     update)    cmd_update "$@" ;;
     login)     cmd_login "$@" ;;
