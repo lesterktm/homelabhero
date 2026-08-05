@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+#
+# hh-unifi - HomelabHero UniFi API broker.
+#
+# The HTTPS sibling of hh-connect. It runs as the vault user (hhvault) through
+# the same narrow sudoers rule, reads a UniFi API key the agent user cannot
+# read, and talks to a UniFi console's local API on the operator's behalf. It
+# never prints, echoes, or returns the key.
+#
+# A router is not an SSH target the way a server is, so it gets its own broker
+# rather than being bent into hh-connect: the credential is a request header
+# rather than a key file, and the "commands" are API paths rather than a remote
+# shell. Everything else - the registry, the vault, the audit log, the refusal
+# to touch loopback - is shared, so a UniFi console is just another registered
+# alias everywhere else in HomelabHero.
+#
+# READ-ONLY, BY CONSTRUCTION. This broker issues GET and nothing else. There is
+# no code path here that can POST, PUT, PATCH, or DELETE, so no prompt, no
+# jailbreak, and no mistake on the agent's side can reconfigure the network
+# through it. The router is the one thing in the homelab whose failure takes
+# away the very access you would need to fix it, so it is treated as a source of
+# truth to read and reason about, never as something to change. Reconfiguring
+# UniFi stays where it belongs: in the UniFi app, done by a person.
+#
+# That is the first of two layers. The second is the key itself: HomelabHero
+# asks you to mint it under a View Only admin, so the console refuses writes
+# even if something ever reached it with this key outside of this broker.
+#
+# Usage: hh-unifi <op> <alias> [args...]
+#
+# Argument order is op-first (hh-connect is alias-first) because the hh CLI
+# passes it straight through, and Claude's permission rules match on a command
+# PREFIX. Op-first means "hh unifi devices ..." can be allowed while
+# "hh unifi raw ..." still asks; alias-first would put a variable in the middle
+# and make read-only and state-changing calls indistinguishable to that rule.
+#
+set -euo pipefail
+
+REG_DIR="/etc/homelabhero/hosts.d"
+VAULT_DIR="/etc/homelabhero/vault"
+AUDIT_LOG="/var/log/homelabhero-broker.log"
+NAME_RE='^[A-Za-z0-9._-]+$'
+TIMEOUT=15
+
+# UniFi OS fronts the Network application behind /proxy/network. Under it live
+# two APIs, and an API key authenticates both:
+#   * the documented Integration API (v1), which is stable and paginated
+#   * the older private API, which still holds things v1 has no equivalent for
+#     (site health / WAN status above all), and which v1 is gradually absorbing
+# Prefer IV1; fall back to the legacy path only where it is the only source.
+IV1="/proxy/network/integration/v1"
+LEGACY="/proxy/network/api/s"
+
+die() { printf 'hh-unifi: %s\n' "$*" >&2; exit 2; }
+
+[ "$#" -ge 2 ] || die "usage: hh-unifi <op> <alias> [args...]"
+OP="$1"; ALIAS="$2"; shift 2
+
+[[ "$ALIAS" =~ $NAME_RE ]] || die "invalid alias"
+CONF="${REG_DIR}/${ALIAS}.conf"
+[ -f "$CONF" ] || die "no such registered host: ${ALIAS}"
+
+# Parse the registry entry safely (no sourcing). Only known keys are accepted.
+#
+# Split on the FIRST '=' by hand rather than with IFS='=', because a value is
+# allowed to contain one: a pinned public key is base64 and ends in '=' padding,
+# and IFS splitting silently eats that trailing character, which turns a valid
+# pin into one that can never match.
+HOST=""; PORT="443"; AUTH=""; CRED=""; SITE=""; SITE_NAME=""; PIN=""
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|\#*) continue ;; *=*) : ;; *) continue ;; esac
+  key="${line%%=*}"; val="${line#*=}"
+  key="${key//[[:space:]]/}"
+  val="${val%\"}"; val="${val#\"}"; val="${val## }"; val="${val%% }"
+  case "$key" in
+    HOST)      HOST="$val" ;;
+    PORT)      PORT="$val" ;;
+    AUTH)      AUTH="$val" ;;
+    CRED)      CRED="$val" ;;
+    SITE)      SITE="$val" ;;
+    SITE_NAME) SITE_NAME="$val" ;;
+    PIN)       PIN="$val" ;;
+  esac
+done < "$CONF"
+
+[ "$AUTH" = "apikey" ] || die "'${ALIAS}' is not an API-key host (AUTH=${AUTH:-none}); use 'hh run ${ALIAS}' instead"
+[ -n "$HOST" ] || die "registry entry missing HOST"
+[ -n "$CRED" ] || die "registry entry missing CRED"
+[[ "$PORT" =~ ^[0-9]+$ ]] || die "invalid PORT"
+[[ "$CRED" =~ $NAME_RE ]] || die "invalid credential reference"
+
+# Same rule as hh-connect: never let the broker be turned inward on this
+# machine, which is where the vault lives.
+case "$HOST" in
+  127.*|::1|localhost|localhost.*) die "refusing loopback target" ;;
+esac
+
+CREDFILE="${VAULT_DIR}/${CRED}"
+[ -f "$CREDFILE" ] || die "credential not found in vault"
+case "$(readlink -f "$CREDFILE")" in
+  "${VAULT_DIR}/"*) : ;;
+  *) die "credential path escapes vault" ;;
+esac
+KEY="$(tr -d '\r\n' <"$CREDFILE")"
+[ -n "$KEY" ] || die "credential is empty"
+
+BASE="https://${HOST}:${PORT}"
+[ -n "$SITE_NAME" ] || SITE_NAME="default"
+
+audit() { printf '%s\t%s\tUNIFI %s:%s\t%s\n' \
+  "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ALIAS" "$HOST" "$PORT" "$*" \
+  >>"$AUDIT_LOG" 2>/dev/null || true; }
+
+# ---------------------------------------------------------------------------
+# HTTP
+
+# Perform one GET and print the response body. Dies with a plain-language
+# message on anything that is not a success status, because the caller of this
+# broker is usually an LLM relaying the result to a human.
+#
+# There is deliberately no method argument. Making the verb un-passable is the
+# whole enforcement: a read-only rule written in a comment is a request, but a
+# function that cannot express a write is a guarantee.
+_get() {
+  local path="$1"
+  local args=(-sS -m "$TIMEOUT" -X GET -H 'Accept: application/json' -w '\n%{http_code}')
+
+  # A UniFi console ships a self-signed certificate, so ordinary CA validation
+  # cannot apply. Instead we pin the console's public key at registration
+  # (trust on first use, exactly like SSH's accept-new) and verify against that
+  # pin on every call. -k switches off the CA and hostname checks that cannot
+  # succeed here; --pinnedpubkey is checked independently of -k and is what
+  # actually authenticates the far end. An unpinned entry still works, so an
+  # older registration keeps running, but it is only as safe as the LAN.
+  args+=(-k)
+  [ -n "$PIN" ] && args+=(--pinnedpubkey "$PIN")
+
+  local errf resp rc=0
+  errf="$(mktemp)"
+  # The key goes in through a curl config file on stdin, never argv and never
+  # the environment. /proc/<pid>/cmdline is world readable, so a key passed as
+  # -H "X-API-KEY: ..." would be readable by the very agent user this broker
+  # exists to keep it away from. printf is a shell builtin, so it does not leak
+  # through a process of its own either.
+  resp="$(printf 'header = "X-API-KEY: %s"\n' "$KEY" \
+    | curl -K - "${args[@]}" "${BASE}${path}" 2>"$errf")" || rc=$?
+  local err; err="$(tr -d '\r' <"$errf")"; rm -f "$errf"
+
+  if [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      90) die "TLS public key pin does not match for ${HOST}.
+    The console is presenting a different certificate than when it was
+    registered. That is expected after a firmware update or after installing
+    your own certificate, and it is what a machine-in-the-middle would also
+    look like. If you changed the certificate, re-pin it from an admin shell:
+        hh repin ${ALIAS}
+    If you did not, treat it as suspicious and rotate the API key." ;;
+      28) die "timed out after ${TIMEOUT}s talking to ${HOST}:${PORT}" ;;
+      7)  die "cannot connect to ${HOST}:${PORT} (is the console reachable, and is the API on this port?)" ;;
+      *)  die "request failed (curl ${rc}): ${err:-no detail}" ;;
+    esac
+  fi
+
+  local code="${resp##*$'\n'}" out="${resp%$'\n'*}"
+  case "$code" in
+    2*) printf '%s' "$out" ;;
+    401|403) die "the UniFi API key was rejected (HTTP ${code}). Re-create it in the
+    Network app under Settings -> Control Plane -> Integrations (mint it under a
+    View Only admin), then update it from an admin shell:
+        hh rm-host ${ALIAS} && hh add-unifi" ;;
+    404) die "no such API path on this console (HTTP 404): ${path}
+    A UniFi console needs Network 9.0 or newer for the integration API." ;;
+    429) die "rate limited by the console (HTTP 429); retry in a moment" ;;
+    *)   die "HTTP ${code} from ${path}: $(printf '%s' "$out" | tr -d '\n' | cut -c1-200)" ;;
+  esac
+}
+
+# Guard against a silently empty section. A response that is not the shape we
+# expect is reported as such rather than being printed as "nothing found",
+# because those two look identical to a reader and only one of them is true.
+_expect_data() {
+  printf '%s' "$1" | jq -e 'has("data")' >/dev/null 2>&1 && return 0
+  die "unexpected response from ${2}: $(printf '%s' "$1" | tr -d '\n' | cut -c1-160)"
+}
+
+# ---------------------------------------------------------------------------
+# Site resolution
+#
+# The integration API addresses a site by UUID; the legacy API addresses the
+# same site by its short internal name (usually "default"). Resolve both once
+# and cache them back into the registry entry, which is non-secret and owned by
+# the vault user, so later calls skip the lookup.
+# Rewrite one key in the registry entry, atomically and without needing write
+# permission on the file itself.
+#
+# The entry is written by `hh add-unifi` as root (mode 644) but lives in a
+# directory owned by the vault user, so redirecting onto it fails: truncating a
+# file needs permission on the FILE, while replacing it needs permission on the
+# DIRECTORY, which is what we have. Hence a temp file in the SAME directory
+# followed by a rename - a same-filesystem rename(2) needs only that directory
+# write bit, and swaps the entry in one step so a concurrent reader never sees a
+# half-written registry.
+#
+# This is a cache, never a source of truth: if it cannot be written the lookup
+# simply happens again next time, so failure here is silent on purpose.
+_remember() {
+  local key="$1" val="$2" tmp
+  tmp="$(mktemp "${REG_DIR}/.${ALIAS}.XXXXXX" 2>/dev/null)" || return 0
+  {
+    grep -v "^${key}=" "$CONF" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$val"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$CONF" 2>/dev/null || rm -f "$tmp"
+  return 0
+}
+
+_site() {
+  if [ -z "$SITE" ]; then
+    local j; j="$(_get "${IV1}/sites")"
+    _expect_data "$j" "${IV1}/sites"
+    SITE="$(printf '%s' "$j" | jq -r '(.data // [])[0].id // empty')"
+    [ -n "$SITE" ] || die "the console returned no sites"
+    SITE_NAME="$(printf '%s' "$j" | jq -r '(.data // [])[0].internalReference // "default"')"
+    _remember SITE "$SITE"
+    _remember SITE_NAME "$SITE_NAME"
+  fi
+  printf '%s' "$SITE"
+}
+
+# Expand {site} and {siteName} in a caller-supplied path so the escape-hatch
+# ops are usable without the caller having to know either identifier.
+_expand() {
+  local p="$1"
+  case "$p" in *'{site}'*) p="${p//\{site\}/$(_site)}" ;; esac
+  case "$p" in *'{siteName}'*) _site >/dev/null; p="${p//\{siteName\}/$SITE_NAME}" ;; esac
+  printf '%s' "$p"
+}
+
+_check_path() {
+  local p="$1"
+  case "$p" in
+    /proxy/network/*) : ;;
+    *) die "path must start with /proxy/network/ (got: ${p})" ;;
+  esac
+  case "$p" in *..*) die "path may not contain '..'" ;; esac
+}
+
+# ---------------------------------------------------------------------------
+# Ops
+
+op_info() { _get "${IV1}/info"; }
+
+op_ping() {
+  local j ver
+  j="$(_get "${IV1}/info")"
+  ver="$(printf '%s' "$j" | jq -r '.applicationVersion // empty' 2>/dev/null || true)"
+  printf 'unifi-ok %s (Network %s)\n' "$HOST" "${ver:-unknown}"
+}
+
+op_sites() {
+  local j; j="$(_get "${IV1}/sites")"
+  _expect_data "$j" "${IV1}/sites"
+  printf '%s' "$j" | jq -r '(.data // [])[] | "\(.id)\t\(.internalReference // "-")\t\(.name // "-")"' \
+    | awk -F'\t' 'BEGIN{printf "%-26s %-12s %s\n","SITE ID","SHORT NAME","NAME"} {printf "%-26s %-12s %s\n",$1,$2,$3}'
+}
+
+op_devices() {
+  local j; j="$(_get "${IV1}/sites/$(_site)/devices?limit=200")"
+  _expect_data "$j" "devices"
+  printf '%s' "$j" | jq -r '(.data // [])[] |
+      "\(.name // "?")\t\(.model // "?")\t\(.state // "?")\t\(.ipAddress // "-")\t\(.firmwareVersion // "-")\t\(if .firmwareUpdatable then "update available" else "" end)"' \
+    | awk -F'\t' 'BEGIN{printf "%-26s %-12s %-9s %-16s %-12s %s\n","NAME","MODEL","STATE","IP","FIRMWARE","NOTE"}
+                  {printf "%-26s %-12s %-9s %-16s %-12s %s\n",$1,$2,$3,$4,$5,$6}'
+}
+
+op_device() {
+  [ "$#" -ge 1 ] || die "usage: hh unifi device [alias] <deviceId>"
+  _get "${IV1}/sites/$(_site)/devices/$1"
+}
+
+op_stats() {
+  [ "$#" -ge 1 ] || die "usage: hh unifi stats [alias] <deviceId>"
+  _get "${IV1}/sites/$(_site)/devices/$1/statistics/latest"
+}
+
+op_clients() {
+  local j; j="$(_get "${IV1}/sites/$(_site)/clients?limit=200")"
+  _expect_data "$j" "clients"
+  printf '%s' "$j" | jq -r '(.data // [])[] |
+      "\(.name // .hostname // "?")\t\(.ipAddress // "-")\t\(.macAddress // "-")\t\(.type // "-")\t\(.connectedAt // "-")"' \
+    | awk -F'\t' 'BEGIN{printf "%-28s %-16s %-18s %-10s %s\n","NAME","IP","MAC","TYPE","CONNECTED SINCE"}
+                  {printf "%-28s %-16s %-18s %-10s %s\n",$1,$2,$3,$4,$5}'
+}
+
+op_networks() {
+  local j; j="$(_get "${IV1}/sites/$(_site)/networks")"
+  _expect_data "$j" "networks"
+  printf '%s' "$j" | jq -r '(.data // [])[] | "\(.name // "?")\t\(.vlanId // "-")\t\(.subnet // .ipSubnet // "-")"' \
+    | awk -F'\t' 'BEGIN{printf "%-24s %-8s %s\n","NETWORK","VLAN","SUBNET"} {printf "%-24s %-8s %s\n",$1,$2,$3}'
+}
+
+# WAN / internet / LAN / WiFi health. This one has no integration-API
+# equivalent yet, so it uses the legacy path. Kept separate from summary so a
+# caller can ask for the raw picture.
+op_health() {
+  _site >/dev/null
+  local j; j="$(_get "${LEGACY}/${SITE_NAME}/stat/health")"
+  _expect_data "$j" "stat/health"
+  printf '%s' "$j" | jq -r '(.data // [])[] |
+    if   .subsystem == "wan"  then "WAN       \(.status // "?")      ip \(.wan_ip // "?")   gateway \(.gw_name // "?") \(.gw_version // "")   isp \(.isp_name // "?")"
+    elif .subsystem == "www"  then "Internet  \(.status // "?")      latency \(.latency // "?") ms   down/up \(.xput_down // "?")/\(.xput_up // "?") Mbps   uptime \(.uptime // "?")s"
+    elif .subsystem == "lan"  then "LAN       \(.status // "?")      \(.num_user // 0) clients, \(.num_sw // 0) switches, \(.num_adopted // 0) adopted, \(.num_disconnected // 0) offline"
+    elif .subsystem == "wlan" then "WiFi      \(.status // "?")      \(.num_user // 0) clients, \(.num_ap // 0) APs, \(.num_adopted // 0) adopted, \(.num_disconnected // 0) offline"
+    elif .subsystem == "vpn"  then "VPN       \(.status // "?")"
+    else empty end'
+}
+
+# The compact block hh overview and hh inventory print. Health is the richer
+# source but lives on the legacy API, so fall back to counts from the
+# integration API rather than printing nothing if it is unavailable.
+#
+# Note on error handling throughout: die() runs `exit`, and an `exit` inside a
+# command substitution ends that subshell outright - an `|| true` written INSIDE
+# the substitution never runs, so it catches nothing. Every tolerated call below
+# therefore puts its fallback OUTSIDE the substitution, where it sees the real
+# status. Getting this backwards made an unreachable console produce silence
+# instead of a reason, which is the one outcome this command must never have.
+op_summary() {
+  local ver info site health dev cli
+
+  # Deliberately NOT tolerated: if the console cannot be reached or the key is
+  # refused, that is the answer, and it should be reported rather than papered
+  # over with a header and a set of blank sections.
+  info="$(_get "${IV1}/info")"
+  ver="$(printf '%s' "$info" | jq -r '.applicationVersion // empty' 2>/dev/null)" || ver=""
+  site="$(_site)"
+  # No "# alias (unifi)" banner here: hh overview and hh inventory already print
+  # one, and repeating it made every console appear twice.
+  printf 'Console   %s   Network %s\n' "$HOST" "${ver:-?}"
+
+  # Health lives on the legacy API, which not every console exposes. Run it in a
+  # subshell so a failure there cannot exit this whole command.
+  if health="$(op_health 2>/dev/null)" && [ -n "$health" ]; then
+    printf '%s\n' "$health"
+  else
+    echo "(site health unavailable on this console; reporting counts only)"
+  fi
+
+  dev="$(_get "${IV1}/sites/${site}/devices?limit=200" 2>/dev/null)" || dev=""
+  if printf '%s' "$dev" | jq -e 'has("data")' >/dev/null 2>&1; then
+    printf '%s' "$dev" | jq -r '"Devices   \((.data // []) | length) adopted, \([(.data // [])[] | select(.state == "ONLINE")] | length) online"'
+    # Firmware waiting to be applied is the single most common thing a person
+    # actually wants to be told about their network gear, so surface it here
+    # rather than making someone go read the device table.
+    printf '%s' "$dev" | jq -r '[(.data // [])[] | select(.firmwareUpdatable == true) | .name // "?"] |
+      if length > 0 then "Updates   firmware available for \(length) device\(if length == 1 then "" else "s" end): \(join(", "))" else empty end'
+  fi
+  cli="$(_get "${IV1}/sites/${site}/clients?limit=1" 2>/dev/null)" || cli=""
+  if printf '%s' "$cli" | jq -e 'has("totalCount")' >/dev/null 2>&1; then
+    printf '%s' "$cli" | jq -r '"Clients   \(.totalCount) connected"'
+  fi
+}
+
+# Escape hatch: any GET under /proxy/network/. This covers everything the named
+# ops do not - port forwards, firewall rules, WLAN config, the event log -
+# without this broker having to grow an op per endpoint, and without giving up
+# the read-only guarantee, since it can still only issue a GET.
+op_get() {
+  [ "$#" -ge 1 ] || die "usage: hh unifi get [alias] </proxy/network/...>   ({site} and {siteName} are expanded)"
+  local p; p="$(_expand "$1")"
+  _check_path "$p"
+  _get "$p"
+}
+
+audit "$OP $*"
+
+case "$OP" in
+  ping)     op_ping ;;
+  info)     op_info ;;
+  summary)  op_summary ;;
+  sites)    op_sites ;;
+  devices)  op_devices ;;
+  device)   op_device "$@" ;;
+  stats)    op_stats "$@" ;;
+  clients)  op_clients ;;
+  networks) op_networks ;;
+  health)   op_health ;;
+  get)      op_get "$@" ;;
+  # Every op above is a GET. There is no write op, and adding one would mean
+  # adding a write path to _get, which is the line this broker does not cross.
+  restart|reboot|set|update|adopt|raw|post|put|delete|patch)
+    die "this broker is read-only: it can only read from UniFi, never change it.
+    '${OP}' would reconfigure the network, so it is not implemented here at all.
+    Make the change in the UniFi app yourself. HomelabHero can tell you exactly
+    what to change and why, and confirm the result afterwards with 'hh unifi
+    summary'." ;;
+  *) die "unknown op: ${OP} (ping info summary sites devices device stats clients networks health get)" ;;
+esac

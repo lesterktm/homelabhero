@@ -89,13 +89,17 @@ changed, and anything worth knowing before you update.
     hh overview                  read-only vitals sweep across all hosts
     hh inventory [alias]         what is RUNNING (VMs, LXCs, containers, apps)
     hh diff [alias]              inventory drift vs the last saved snapshot
-    hh scan [cidr]               discover live hosts on the network
+    hh scan [cidr]               discover live hosts (and your router) on the network
+    hh unifi <op> [alias]        read your UniFi router: summary, health, devices,
+                                 clients, networks (READ-ONLY, see below)
     hh doctor                    check the whole setup is healthy
     hh provision <alias> <host> [port] [platform] [user]
                                  register a host with a generated key (UI-safe);
                                  connects as root by default (pass a user to override)
 
     hh add-host                  register a host (operator)
+    hh add-unifi                 register your UniFi router with an API key (operator)
+    hh repin <alias>             re-pin a UniFi console after its cert changed (operator)
     hh rm-host <alias>           remove a host and its credential
     hh update                    update everything now: HomelabHero + OS (operator)
     hh login                     log Claude Code in as the agent user
@@ -120,9 +124,13 @@ HomelabHero uses privilege separation with a connection broker. Three users:
 
 Claude runs as `hhagent`, which cannot read anything `hhvault` owns. To reach a
 host, Claude runs `hh run`, which invokes the broker `hh-connect` through a single
-narrow sudoers rule (`hhagent` may run only that one program, only as `hhvault`).
+narrow sudoers rule (`hhagent` may run only that broker, its read-only UniFi
+sibling `hh-unifi`, and `hh-provision`, and only as `hhvault`).
 The broker looks the host up in the non-secret registry, reads the key or password
 from the vault, and opens the connection. Claude gets the output, never the secret.
+A UniFi API key works the same way: `hh-unifi` reads it from the vault and passes
+it to curl through a config file on stdin, never on the command line, so it never
+appears in `/proc` where the agent user could read it.
 Even a fully hijacked agent cannot exfiltrate a credential, because the OS will not
 let it read the vault and will not let it run anything but the broker as `hhvault`.
 The broker also refuses loopback targets and unregistered aliases.
@@ -157,6 +165,66 @@ endpoints and guesses what each is (Proxmox on 8006, SSH on 22, and so on), mark
 which are already registered. `hh scan --add` turns that into a picker: choose the
 numbers you want and it walks you through registering each, pre-filling the address
 and platform.
+
+It also looks for your **router**. Anything sitting at your default gateway or at
+the `.1` of the subnet (`192.168.1.1`, `10.99.0.1`, and so on) gets fingerprinted,
+and a UniFi console is identified by name and version:
+
+    #    IP               OPEN PORTS           GUESS            ROLE      REGISTERED?
+    1    10.99.0.1        22,80,443            unifi            gateway   new
+    2    10.99.0.20       22,443               truenas?/linux   -         registered
+
+    Found your router: a UniFi OS console running Network 9.0.114 at 10.99.0.1
+
+Pick it during install (step 10) or any time after, and it registers with an API
+key instead of SSH. This is the router integration below.
+
+## Your UniFi router (read-only, on purpose)
+
+A UniFi console (UDM, UCG, Cloud Key Gen2+, UniFi OS Server, on Network 9.0 or
+newer) can be registered alongside your servers. It shows up in `hh list` like
+anything else, and `hh overview` and `hh inventory` include it:
+
+    Console   10.99.0.1   Network 9.0.114
+    WAN       ok      ip 203.0.113.7   gateway UCG-Ultra 4.2.14   isp Example ISP
+    Internet  ok      latency 12 ms   down/up 940.5/88.2 Mbps   uptime 1209600s
+    LAN       ok      41 clients, 2 switches, 3 adopted, 0 offline
+    WiFi      ok      38 clients, 2 APs, 2 adopted, 0 offline
+    Devices   5 adopted, 5 online
+    Updates   firmware available for 1 device: Office AP
+    Clients   43 connected
+
+That means "the internet is down", "which access point is offline", "is that
+machine actually on the network", and "what VLAN is it on" become questions
+Claude can answer from the gateway itself, instead of inferring from the hosts.
+
+**It can only read. It cannot change anything on your network.** That is enforced
+in three independent places, not just asked for in a prompt:
+
+1. The broker behind `hh unifi` issues HTTP `GET` and has no code path that can
+   `POST`, `PUT`, `PATCH`, or `DELETE`. There is no restart, no reboot, no
+   firewall, VLAN, SSID, or port-forward edit, because none of it is implemented.
+2. You mint the API key under a **View Only** UniFi admin, so the console itself
+   refuses writes from that key regardless of what asks.
+3. The ops brain and the `unifi-ops` skill tell Claude the rule plainly, and tell
+   it what to do instead: explain the change you should make in the UniFi app,
+   then read the state back to confirm it worked.
+
+The router is the one device whose failure takes away the access you would need
+to fix it. A bad firewall rule or an ill-timed reboot can cut off every host, the
+command center, and you, all at once. Reading it is enormously useful; letting an
+agent write to it is not worth that.
+
+Register it from an admin shell (an API key is a secret being typed, so it stays
+out of the chat, exactly like password auth):
+
+    hh add-unifi
+
+It walks you through creating the key in the UniFi app, stores it in the vault
+where the agent cannot read it, and pins the console's TLS public key on first
+contact (trust on first use, like SSH). If you later replace the console's
+certificate, `hh repin <alias>` accepts the new one; until you do, calls fail
+closed rather than quietly trusting a new identity.
 
 ## Adding servers from the UI
 
@@ -222,7 +290,8 @@ auto-update runs it for you after each update.
     ├── setup/main.sh              full installer
     ├── bin/
     │   ├── hh                     control CLI (agent- and operator-facing)
-    │   ├── hh-connect             privileged broker (runs as hhvault)
+    │   ├── hh-connect             privileged SSH broker (runs as hhvault)
+    │   ├── hh-unifi               read-only UniFi API broker (runs as hhvault)
     │   ├── hh-provision           key-only host registration (UI-safe add)
     │   └── hh-update              the one update command: git pull + re-run
     │                              installer headless, then OS packages + doctor
@@ -231,6 +300,7 @@ auto-update runs it for you after each update.
     └── ops/                       becomes ~hhagent/homelab-ops (git-backed)
         ├── CLAUDE.md              always-loaded context + house rules
         ├── capabilities/          per-platform capability catalogs
+        │                          (proxmox, truenas, linux, unifi)
         ├── infra/                 environment-specific references
         ├── inventory/             saved inventory snapshots
         ├── runbooks/              resolved incidents accumulate here
@@ -238,8 +308,9 @@ auto-update runs it for you after each update.
             ├── settings.json      permission posture (forces the broker)
             └── skills/            triage, inventory, add-server, proxmox,
                                    truenas, truenas-middleware, docker,
-                                   host (linux), network, backup-restore,
-                                   security-audit, patch-management, deploy-app
+                                   host (linux), network, unifi (read-only),
+                                   backup-restore, security-audit,
+                                   patch-management, deploy-app
 
 ## Platform notes
 
@@ -255,8 +326,13 @@ auto-update runs it for you after each update.
   Inventory queries both namespaces, so VMs and LXCs are listed on any of them
   with nothing to configure. On 26, which is still beta, LXC containers may not
   be listed yet if they sit under a namespace neither of those covers.
-- No MCP servers and no Grafana/Prometheus. The whole surface is SSH plus the
-  capability catalogs, kept simple on purpose.
+- UniFi: API key, read-only, never SSH. A UniFi console is registered with
+  `hh add-unifi` and reached with `hh unifi <op>`; `hh run` refuses it and says
+  so. Needs UniFi OS (UDM, UCG, UDR, Cloud Key Gen2+, UniFi OS Server) on
+  Network 9.0 or newer, since API keys do not exist on the old self-hosted
+  Network application.
+- No MCP servers and no Grafana/Prometheus. The whole surface is SSH, one
+  read-only router API, plus the capability catalogs, kept simple on purpose.
 
 ## Persistence and backup
 

@@ -14,6 +14,25 @@ description: >
 
 Read `infra/network.md` for topology, subnets, DNS, and mesh CIDR first.
 
+## Ask the gateway first, if it is registered
+
+When a UniFi console is registered (`hh list` shows platform `unifi`), start
+there. One command rules the whole fabric in or out before probing host by host:
+
+    hh unifi summary                 # WAN, internet, LAN, WiFi, devices, clients
+    hh unifi devices                 # anything not ONLINE explains a lot at once
+
+An offline switch or access point accounts for every host behind it, so finding
+one here saves troubleshooting those hosts individually. The unifi-ops skill
+covers the rest, including clients and VLANs.
+
+This is read-only: it diagnoses the fabric, it does not reconfigure it. UniFi
+changes are made by hand in the UniFi app.
+
+What UniFi cannot see, and this skill can: the NetBird mesh, DNS resolution,
+Cloudflare tunnels, and anything inside a host. A service can look perfectly
+healthy from the router and still be unreachable over the mesh.
+
 ## Localize: is it reachability, name resolution, or the service
 
     ping -c2 <host-ip>                 # L3 reachability by IP

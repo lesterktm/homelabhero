@@ -22,9 +22,29 @@ through a broker that holds the credentials for you:
     hh inventory                  # what is RUNNING everywhere (VMs, LXCs, containers, apps)
     hh diff                       # inventory drift vs the last saved snapshot
     hh scan [cidr]                # discover live endpoints on the network (read-only)
+    hh unifi <op> [alias]         # read the UniFi router/console (READ-ONLY)
 
 hh run works the same for every host: TrueNAS, Proxmox, and any Linux box are all
 reached as a normal shell over SSH.
+
+## The router is different, and it is read-only
+
+If a UniFi console is registered (it shows in `hh list` with platform `unifi`),
+it is reached over its local API rather than SSH, so `hh run` does not work on
+it. Use `hh unifi <op>`, starting with `hh unifi summary`. `hh overview` and
+`hh inventory` already include it.
+
+That access is READ-ONLY and cannot be talked into being anything else. There is
+no command that restarts a device, edits a VLAN, SSID, firewall rule, or port
+forward, or writes any UniFi setting: the broker only issues GET requests, and
+the API key is a View Only key that the console itself will not accept writes
+from. Do not look for a way around it, and do not tell the user you have changed
+something on the router, because you cannot have.
+
+When a UniFi change is genuinely needed, that is still a useful conversation:
+say plainly that HomelabHero reads the router but does not change it, then give
+the exact steps to make the change in the UniFi app, and offer to read the state
+back afterwards to confirm it worked. The unifi-ops skill covers this.
 
 Hosts are reached as root by default, so commands run directly - no sudo needed.
 `hh list` shows the connect user per host. Some hosts (notably TrueNAS) may
@@ -80,6 +100,7 @@ Read the relevant one so you use the whole toolset, not just the basics:
 @capabilities/proxmox.md
 @capabilities/truenas.md
 @capabilities/linux.md
+@capabilities/unifi.md
 
 These describe what each system can do and the exact commands to inspect or
 manage every subsystem, all runnable through hh run.
@@ -113,6 +134,8 @@ When the failing layer is not obvious, work outward:
 2. The host it runs on (Proxmox node or TrueNAS) -> proxmox-ops / truenas-ops
 3. Storage underneath it (ZFS pool, dataset, disk) -> truenas-ops
 4. The network between them (mesh, switch, gateway, DNS, tunnels) -> network-diag
+5. The fabric itself, seen from the router (WAN, APs, switches, clients,
+   VLANs) -> unifi-ops
 
 Cross-cutting skills that sit outside the ladder: backup-restore (snapshot,
 restore, roll back, verify recoverability), patch-management (update hosts and

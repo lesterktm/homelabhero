@@ -87,9 +87,10 @@ fi
 # ---------------------------------------------------------------------------
 say "1/10  OS prerequisites"
 $SUDO apt-get update -y
+# openssl is what pins a UniFi console's TLS key at registration (see hh-unifi).
 $SUDO apt-get install -y --no-install-recommends \
   sudo git curl ca-certificates build-essential openssh-client sshpass \
-  tmux jq ripgrep rsync unzip iputils-ping dnsutils netcat-openbsd nmap acl
+  tmux jq ripgrep rsync unzip iputils-ping dnsutils netcat-openbsd nmap acl openssl
 
 # ---------------------------------------------------------------------------
 say "2/10  Privilege-separated users"
@@ -118,6 +119,7 @@ $SUDO install -d -o "$VAULT_USER" -g "$VAULT_USER" -m 700 "$VAULT_DIR"
 # ---------------------------------------------------------------------------
 say "4/10  Broker, CLI, updater, and weekly auto-update"
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-connect" /usr/local/bin/hh-connect
+$SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-unifi"   /usr/local/bin/hh-unifi
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh"         /usr/local/bin/hh
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-update"  /usr/local/bin/hh-update
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-provision" /usr/local/bin/hh-provision
@@ -295,11 +297,13 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-say "10/10  Add your servers"
+say "10/10  Add your servers (and your router)"
 if [ "$HH_NONINTERACTIVE" = 1 ]; then
   echo "Non-interactive; skipping server discovery. Add hosts anytime with 'hh add-host' or by asking Claude in the UI."
 else
   echo "Looking for servers on your network you can add..."
+  echo "This also looks for your router. If it is a UniFi console, you can add it"
+  echo "with a UniFi API key; HomelabHero only ever reads from it, never writes."
   hh scan --add </dev/tty || warn "network scan did not complete"
   while [ "$(printf 'Add another server by hand? (y/N): ' >/dev/tty; read -r a </dev/tty || true; echo "${a:-N}")" = "y" ]; do
     hh add-host </dev/tty || warn "add-host did not complete"
