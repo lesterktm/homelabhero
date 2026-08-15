@@ -42,9 +42,20 @@ curl first (drop the `apt` part if you already have curl; add `sudo` in front of
 
 Then just answer the prompts. The script installs everything, walks you through
 signing Claude in once, finds and adds your servers, and finishes by handing you
-a browser link. From that point on you live in the web UI and talk to Claude in
-plain language ("how is everything doing", "what's running", "restart jellyfin").
-You do not need to remember any commands.
+a browser link.
+
+When it finishes, open the web UI in your browser on **port 3001**:
+
+    http://<your-lxc-ip>:3001
+
+The installer prints that exact address with the IP filled in as its last line.
+(3001 is the default; if you changed `PORT=` in `/etc/homelabhero/cloudcli.env`,
+use that port instead.) On your first visit, create your web login, open the
+`homelab-ops` project, and — if it asks — click the gear icon and turn tools on.
+
+From that point on you live in the web UI and talk to Claude in plain language
+("how is everything doing", "what's running", "restart jellyfin"). You do not
+need to remember any commands.
 
 The `hh` commands below still exist for power users and are available in the web
 UI's built-in terminal, but the normal experience is the browser.
