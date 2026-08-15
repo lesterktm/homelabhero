@@ -31,18 +31,27 @@ die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 # container does not. Fail fast here with an actionable message instead of
 # breaking cryptically halfway through (or, worse, only later at runtime).
 preflight() {
-  # no_new_privs stops sudo from gaining root, and the broker runs through sudo,
-  # so nothing works until it is cleared. This is the flag behind the TrueNAS
-  # "no new privileges" install failure. The lever to clear it differs by
-  # container manager (TrueNAS moved from Incus to libvirt between 25.x and 26),
-  # so keep the message tool-agnostic rather than prescribe commands that only
-  # apply to one of them.
-  if grep -qs '^NoNewPrivs:[[:space:]]*1' /proc/self/status; then
-    cat >&2 <<'EOF'
+  # no_new_privs stops sudo from gaining root, and the broker runs through sudo.
+  # The flag lives in two different places with two completely different fixes,
+  # so read them separately and only complain when the combination really breaks:
+  #   * set on PID 1 -> the whole container is constrained, including the
+  #     command center service, which PID 1 forks. That is the TrueNAS/Incus
+  #     "no new privileges" install failure, and it is a container-level fix.
+  #   * set only on this shell -> the container is fine; the attaching shell
+  #     (TrueNAS web shell, lxc-attach) set it for this session alone. The
+  #     service is unaffected. Recreating the container does NOT fix it.
+  # The flag is one-way - a process can set it but can never clear it - so a
+  # shell that has it must be replaced, not repaired. If /proc/1/status cannot
+  # be read we cannot tell the two apart, so say nothing rather than guess.
+  if [ -r /proc/1/status ]; then
+    if grep -qs '^NoNewPrivs:[[:space:]]*1' /proc/1/status; then
+      cat >&2 <<'EOF'
 
-[error] This container has the "no new privileges" (no_new_privs) flag set, which
-        stops sudo from gaining root. HomelabHero's connection broker runs through
-        sudo, so nothing works until that flag is cleared.
+[error] This container has the "no new privileges" (no_new_privs) flag set on
+        PID 1, so everything inside it - including the command center service -
+        inherits the flag. It stops sudo from gaining root, and HomelabHero's
+        connection broker runs through sudo, so nothing works until it is
+        cleared.
 
         Unprivileged container managers set this flag. To fix it:
 
@@ -56,7 +65,31 @@ preflight() {
 
         Then re-run this installer inside the instance.
 EOF
-    die "no_new_privs is set; sudo cannot escalate to root (see above)."
+      die "no_new_privs is set on PID 1; sudo cannot escalate to root (see above)."
+    elif grep -qs '^NoNewPrivs:[[:space:]]*1' /proc/self/status; then
+      cat >&2 <<'EOF'
+
+        This shell has the "no new privileges" (no_new_privs) flag set, but PID 1
+        does not - so the container itself is fine and only this session is
+        affected. The TrueNAS web shell and lxc-attach set the flag per session.
+        sudo refuses to escalate under it, and the flag cannot be cleared once
+        set, so this shell cannot be repaired - use a different one:
+
+          systemd-run --pty --quiet /bin/bash    (a shell spawned by PID 1)
+
+        or SSH into the container instead of attaching from the host UI. Then
+        re-run this installer there.
+
+        Do NOT recreate the container as privileged: this is not a container
+        setting, and on TrueNAS 26 the ID Map Type is fixed at creation, so that
+        costs a full rebuild and does not fix this.
+EOF
+      if [ "$(id -u)" -eq 0 ]; then
+        warn "no_new_privs is set on this shell only; continuing, since this shell is already root and nothing here has to escalate."
+      else
+        die "no_new_privs is set on this shell; sudo cannot escalate to root (see above)."
+      fi
+    fi
   fi
 
   # The command center is installed and run as a systemd service.
