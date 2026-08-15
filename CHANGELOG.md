@@ -24,6 +24,43 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-2-1"></a>
+
+## 1.2.1 (2026-08-15)
+
+Installs on TrueNAS 26 that died on the first line of setup now work.
+
+### Fixed
+
+- The installer no longer aborts when `no_new_privs` is set on the attaching
+  shell alone. The preflight read the flag from `/proc/self/status` and stopped
+  there, so a TrueNAS web shell or `lxc-attach` session - both of which set the
+  flag per session, on containers whose PID 1 is clean - failed immediately
+  after `Starting setup...`, with advice to recreate the container as
+  privileged. That advice could not have worked: the flag was never a property
+  of the container, and on TrueNAS 26 the ID Map Type is fixed at creation, so
+  following it cost a full rebuild and changed nothing.
+
+  The flag is now read from `/proc/1/status` and `/proc/self/status`
+  separately, because the two mean different things. Set on PID 1, the whole
+  container is constrained - including the command center service, which PID 1
+  forks - and the install still stops with the privileged-recreate or
+  run-in-a-VM advice, which applies there and only there. Set on the shell
+  alone, the install continues when it is already root, since nothing has to
+  escalate, and stops for a non-root user with the fix that actually works:
+  get a shell from PID 1 with `systemd-run --pty --quiet /bin/bash`, or SSH in
+  rather than attaching from the host UI. The flag is one-way and cannot be
+  cleared, so such a shell has to be replaced, not repaired. If
+  `/proc/1/status` cannot be read, the check says nothing rather than guessing.
+
+### Changed
+
+- The README names the web UI's port. It described the installer as finishing
+  with "a browser link" without ever saying `3001`, so anyone who scrolled past
+  the final banner had nothing to go back to. The address, the `PORT=` override
+  in `/etc/homelabhero/cloudcli.env`, and the first-visit steps are now written
+  out in the install section.
+
 <a id="v1-2-0"></a>
 
 ## 1.2.0 (2026-08-05)
