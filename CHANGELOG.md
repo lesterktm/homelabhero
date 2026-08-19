@@ -52,6 +52,16 @@ Firewalla joins UniFi as a network appliance HomelabHero can read.
   it is operator-only and shell-only, because an API token is a secret being
   typed and a secret typed into an LLM session has already been seen by the LLM.
 
+  On an account with more than one Firewalla it lists them and asks which one
+  the alias means, writing `BOX=`/`BOX_NAME=` into the registry entry. Register
+  a second box under its own alias to read both. The MSP API is a fleet API and
+  every read has to name a box, so without this the two halves deadlocked: the
+  broker refused to guess and said to "re-register naming the one you mean",
+  while registration had no way to name one. Found by testing against a real
+  two-box account. The pin is settled BEFORE the reachability test, because on
+  such an account the test's own ping needs to know which box it is pinging -
+  doing it the other way round made a perfectly good token look broken.
+
 - A `firewalla-ops` skill and `capabilities/firewalla.md`, plus Firewalla
   sections in the ops brain, `infra/network.md`, and the `network-diag` skill.
 

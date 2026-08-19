@@ -281,6 +281,10 @@ Register it from an admin shell:
 
     hh add-firewalla
 
+If your MSP account has more than one Firewalla, it lists them and asks which one
+this alias means. Register the others under their own aliases to read them too,
+then name the alias in commands (`hh firewalla summary fw-cabin`).
+
 One thing to know going in: this uses the **Firewalla MSP API** (the cloud
 portal at `https://<yourname>.firewalla.net`), because Firewalla publishes no
 supported local API - the on-box service on port 8833 is internal and

@@ -27,6 +27,24 @@ What there IS to do, when a change is needed, is tell him exactly what to
 change in the Firewalla app and then verify the result by reading it back. See
 the firewalla-ops skill.
 
+## One alias reads one box
+
+The MSP API is a fleet API: a single token can see every Firewalla on the
+account. HomelabHero pins each alias to exactly one box at registration, so
+`hh firewalla ...` is never ambiguous about which firewall it is reporting on.
+`hh list` shows the alias; `hh firewalla boxes` shows every box the token can
+see, pinned or not.
+
+If the account has more than one box, `hh add-firewalla` lists them and asks
+which one this alias means. To read a second box, register it again under its
+own alias (`fw-home`, `fw-cabin`), and then name the alias in commands:
+`hh firewalla summary fw-cabin`. With more than one registered, omitting the
+alias is an error rather than a guess.
+
+An entry with no pinned box - registered before this existed, or on an account
+that has since gained a box - fails with an explanation rather than reporting on
+the wrong firewall. Re-register it to fix.
+
 ## Overall state
 
 - One-screen picture: `hh firewalla summary`

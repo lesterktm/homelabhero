@@ -262,9 +262,17 @@ _box() {
     case "$n" in
       0) die "this MSP account has no Firewalla boxes in it" ;;
       1) : ;;
-      *) die "this MSP account manages ${n} boxes; HomelabHero registers one box per
-    alias. Re-register naming the one you mean (its gid is in 'hh firewalla
-    boxes'), from an admin shell: hh rm-host ${ALIAS} && hh add-firewalla" ;;
+      # One alias reads one box, and this entry does not say which. Guessing
+      # would silently report the wrong firewall, which is worse than stopping.
+      # Registration is where this gets settled, because it is the only place a
+      # person is present to answer: the broker runs as the vault user with no
+      # terminal. 'hh add-firewalla' lists the boxes and asks.
+      *) die "this MSP account manages ${n} Firewalla boxes, and '${ALIAS}' does not
+    say which one it means (it was registered before the box was pinned, or the
+    account gained a box since). Re-register it from an admin shell - it will
+    list the boxes and ask:
+        hh rm-host ${ALIAS} && hh add-firewalla
+    'hh firewalla boxes ${ALIAS}' still lists them all in the meantime." ;;
     esac
     BOX="$(printf '%s' "$rows" | jq -r '.[0].gid // empty')"
     [ -n "$BOX" ] || die "the MSP returned a box with no gid"

@@ -732,6 +732,73 @@ EOF
   fi
 }
 
+# Pin which box on the MSP account an alias refers to.
+#
+# The MSP API is a fleet API: one token can see every Firewalla on the account,
+# and every read has to name one of them. The broker caches that choice in the
+# registry entry, but it can only make the choice unattended when there is
+# exactly one box. With two it has to ask - and the broker runs as the vault
+# user with no terminal to ask from, which is why this lives here, at
+# registration, where a person is actually present.
+#
+# Without this the two halves deadlocked: the broker refused to guess and told
+# you to "re-register naming the one you mean", and registration had no way to
+# name one.
+_firewalla_pick_box() {
+  local alias="$1" f="${REG_DIR}/${alias}.conf" j n gid name
+  j="$(firewalla_broker get "$alias" /v2/boxes 2>/dev/null)" || j=""
+  # A failed fetch is deliberately not diagnosed here. The reachability test
+  # that follows says exactly what went wrong - bad token, no active plan,
+  # unreachable - and two messages for one cause reads like two faults.
+  printf '%s' "$j" | jq -e 'type == "array"' >/dev/null 2>&1 || return 0
+  n="$(printf '%s' "$j" | jq -r 'length')"
+
+  case "$n" in
+    0)
+      echo "  (the MSP listed no boxes; nothing to pin)" >/dev/tty
+      return 0 ;;
+    1)
+      gid="$(printf '%s' "$j" | jq -r '.[0].gid // empty')"
+      name="$(printf '%s' "$j" | jq -r '.[0].name // "Firewalla"')"
+      ;;
+    *)
+      cat >/dev/tty <<EOF
+
+This MSP account manages ${n} Firewalla boxes. One alias reads one box, so pick
+which one '${alias}' should mean. To read the others too, register them the same
+way under their own aliases.
+
+EOF
+      printf '%s' "$j" | jq -r 'to_entries[] |
+        "\(.key + 1)\t\(.value.name // "?")\t\(.value.model // "?")\t\(.value.mode // "-")\t\(if .value.online then "online" else "OFFLINE" end)\t\(.value.gid // "-")"' \
+        | awk -F'\t' 'BEGIN{printf "  %-3s %-22s %-10s %-9s %-9s %s\n","#","NAME","MODEL","MODE","STATE","GID"}
+                        {printf "  %-3s %-22s %-10s %-9s %-9s %s\n",$1,$2,$3,$4,$5,$6}' >/dev/tty
+      echo >/dev/tty
+      local pick idx
+      while :; do
+        pick="$(ask "Which box is '${alias}'? (1-${n})" 1)"
+        pick="${pick// /}"
+        if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "$n" ]; then break; fi
+        echo "  Enter a number between 1 and ${n}." >/dev/tty
+      done
+      idx=$((pick-1))
+      gid="$(printf '%s' "$j" | jq -r --argjson i "$idx" '.[$i].gid // empty')"
+      name="$(printf '%s' "$j" | jq -r --argjson i "$idx" '.[$i].name // "Firewalla"')"
+      ;;
+  esac
+
+  if [ -z "$gid" ]; then
+    echo "  (could not read a box id; it will be resolved on first use)" >/dev/tty
+    return 0
+  fi
+  # Replace rather than append, so re-registering over an entry that already
+  # carries a stale pin does the right thing.
+  sudo sed -i '/^BOX=/d;/^BOX_NAME=/d' "$f"
+  printf 'BOX=%s\nBOX_NAME=%s\n' "$gid" "$name" | sudo tee -a "$f" >/dev/null
+  if [ "$n" -gt 1 ]; then echo "  Pinned '${alias}' to ${name}." >/dev/tty; fi
+  return 0
+}
+
 # Register a Firewalla. Operator-only and shell-only, for the same reason the
 # UniFi one is: an API token is a secret being typed, and a secret typed into an
 # LLM session has already been seen by the LLM. There is deliberately no
@@ -792,10 +859,12 @@ EOF
   sudo chmod 644 "${REG_DIR}/${alias}.conf"
 
   echo >/dev/tty; echo "Registered '${alias}'. Testing..." >/dev/tty
+  # Settle which box this alias means BEFORE testing reachability, not after.
+  # On an account with more than one box every read has to name one, and that
+  # includes the ping the test does - so pinning second would make a perfectly
+  # good token look broken.
+  _firewalla_pick_box "$alias"
   if cmd_test "$alias"; then
-    # Resolve and cache the box id so the first real command is not slower than
-    # every one after it.
-    firewalla_broker boxes "$alias" >/dev/null 2>&1 || true
     echo >/dev/tty
     firewalla_broker summary "$alias" 2>&1 | sed 's/^/  /' >/dev/tty || true
   else
