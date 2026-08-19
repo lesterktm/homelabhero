@@ -40,6 +40,31 @@ Not registered yet? An admin adds it from a shell with `hh add-unifi`. It needs
 a UniFi API key, minted under a View Only admin, which is why it cannot be done
 from the chat.
 
+## Asking the firewall directly
+
+If a Firewalla is registered (check `hh list` for platform `firewalla`), it
+answers the security and traffic questions the router cannot:
+
+    hh firewalla summary             # box, firmware, WAN IP, device/rule/alarm counts
+    hh firewalla alarms              # port scans, abnormal uploads, new devices
+    hh firewalla flows               # what talked to what, blocked or allowed
+    hh firewalla devices             # every client on the network
+    hh firewalla rules               # what is blocked, and whether it is paused
+
+This is READ-ONLY. Unlike UniFi, a Firewalla API token has no View Only tier, so
+the GET-only broker is the only thing enforcing that - see the firewalla-ops
+skill and `capabilities/firewalla.md`. Configuration changes are made by hand in
+the Firewalla app.
+
+Note that this path goes through the Firewalla MSP cloud, not over the LAN
+(Firewalla publishes no supported local API). If the internet is down, these
+commands fail while the box itself is fine. Ping its LAN IP to tell the two
+apart.
+
+Not registered yet? An admin adds it from a shell with `hh add-firewalla`. It
+needs an MSP personal access token, which is why it cannot be done from the
+chat.
+
 ## Reachability checks
 
     ping -c3 <host-mesh-ip>

@@ -153,6 +153,7 @@ $SUDO install -d -o "$VAULT_USER" -g "$VAULT_USER" -m 700 "$VAULT_DIR"
 say "4/10  Broker, CLI, updater, and weekly auto-update"
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-connect" /usr/local/bin/hh-connect
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-unifi"   /usr/local/bin/hh-unifi
+$SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-firewalla" /usr/local/bin/hh-firewalla
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh"         /usr/local/bin/hh
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-update"  /usr/local/bin/hh-update
 $SUDO install -o root -g root -m 755 "${REPO_ROOT}/bin/hh-provision" /usr/local/bin/hh-provision

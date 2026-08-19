@@ -23,6 +23,7 @@ through a broker that holds the credentials for you:
     hh diff                       # inventory drift vs the last saved snapshot
     hh scan [cidr]                # discover live endpoints on the network (read-only)
     hh unifi <op> [alias]         # read the UniFi router/console (READ-ONLY)
+    hh firewalla <op> [alias]     # read the Firewalla firewall (READ-ONLY)
 
 hh run works the same for every host: TrueNAS, Proxmox, and any Linux box are all
 reached as a normal shell over SSH.
@@ -45,6 +46,21 @@ When a UniFi change is genuinely needed, that is still a useful conversation:
 say plainly that HomelabHero reads the router but does not change it, then give
 the exact steps to make the change in the UniFi app, and offer to read the state
 back afterwards to confirm it worked. The unifi-ops skill covers this.
+
+The same applies to a registered Firewalla (platform `firewalla`), reached with
+`hh firewalla <op>`, starting with `hh firewalla summary`. It is also read-only
+and also cannot be talked into being anything else.
+
+One difference is worth holding on to. UniFi is read-only twice over: the broker
+issues only GET, AND its key is a View Only key the console refuses writes from.
+Firewalla has no View Only token tier, so its token is fully privileged and the
+GET-only broker is the only thing enforcing this. The practical rule does not
+change - you read, Evan writes - but there is no second net under you here.
+
+Firewalla is also reached through the MSP cloud rather than over the LAN, so if
+the internet is down, `hh firewalla` fails while the box itself is perfectly
+fine. Never report that as "the firewall is down" without checking the box's LAN
+IP with ping first. The firewalla-ops skill covers this.
 
 Hosts are reached as root by default, so commands run directly - no sudo needed.
 `hh list` shows the connect user per host. Some hosts (notably TrueNAS) may
@@ -101,6 +117,7 @@ Read the relevant one so you use the whole toolset, not just the basics:
 @capabilities/truenas.md
 @capabilities/linux.md
 @capabilities/unifi.md
+@capabilities/firewalla.md
 
 These describe what each system can do and the exact commands to inspect or
 manage every subsystem, all runnable through hh run.
@@ -136,6 +153,8 @@ When the failing layer is not obvious, work outward:
 4. The network between them (mesh, switch, gateway, DNS, tunnels) -> network-diag
 5. The fabric itself, seen from the router (WAN, APs, switches, clients,
    VLANs) -> unifi-ops
+6. The perimeter, seen from the firewall (security alarms, traffic flows,
+   firewall rules, every device on the network) -> firewalla-ops
 
 Cross-cutting skills that sit outside the ladder: backup-restore (snapshot,
 restore, roll back, verify recoverability), patch-management (update hosts and
