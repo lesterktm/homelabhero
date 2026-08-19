@@ -24,6 +24,96 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-3-0"></a>
+
+## 1.3.0 (2026-08-18)
+
+Firewalla joins UniFi as a network appliance HomelabHero can read.
+
+### Added
+
+- `hh firewalla <op> [alias]` reads a Firewalla box through the Firewalla MSP
+  API, with a new `hh-firewalla` broker built on the same shape as `hh-unifi`:
+  it runs as the vault user, reads a token the agent user cannot read, passes it
+  to curl through a config file on stdin rather than argv, and logs every call
+  to the broker audit log.
+
+  Ops: `summary`, `ping`, `info`, `boxes`, `devices`, `device`, `alarms`,
+  `flows`, `rules`, `targetlists`, `stats`, and `get` for any other GET
+  under `/v2/`. A registered box appears in `hh list`, `hh test`, `hh doctor`,
+  `hh overview`, and `hh inventory` like any other host.
+
+  This covers ground UniFi cannot: security alarms (port scans, abnormal
+  uploads, new devices), per-device traffic flows with the destination and
+  whether it was blocked, and the firewall rules themselves including whether a
+  rule is active or quietly paused.
+
+- `hh add-firewalla` registers a box from an admin shell. Like `hh add-unifi`,
+  it is operator-only and shell-only, because an API token is a secret being
+  typed and a secret typed into an LLM session has already been seen by the LLM.
+
+- A `firewalla-ops` skill and `capabilities/firewalla.md`, plus Firewalla
+  sections in the ops brain, `infra/network.md`, and the `network-diag` skill.
+
+- `hh run` on a Firewalla now stops with a pointer to `hh firewalla`, the way it
+  already did for a UniFi console. Without it, an API-token host fell through to
+  "unknown AUTH type: apitoken" from the bottom of the SSH broker.
+
+`hh scan` deliberately does not learn to find a Firewalla. Registration needs an
+MSP portal domain rather than a LAN address, so there is nothing a subnet sweep
+could hand to `hh add-firewalla`; the box still shows up in a scan as a gateway.
+
+### Read-only, and why it is enforced differently here
+
+The broker issues HTTP GET and has no code path that can POST, PUT, PATCH, or
+DELETE, and every write-shaped op name (`pause`, `resume`, `block`, `delete`,
+`create`, `mute`, ...) is refused by name rather than left to fail obscurely.
+
+This matters more than it does for UniFi. The UniFi integration has two
+independent locks: a GET-only broker AND an API key minted under a View Only
+admin that the console itself refuses writes from. **Firewalla has no View Only
+token tier** - an MSP personal access token carries every permission the account
+has, and the API really does expose rule creation, deletion, and pausing. So
+there is no second lock to fall back on, and the broker's construction is the
+whole guarantee. The skill and the ops brain say so explicitly rather than
+letting the UniFi wording imply a safety net that is not there.
+
+### Notes on the integration
+
+- It uses the **MSP cloud API** (`https://<yourname>.firewalla.net/v2/...`), not
+  a LAN connection. Firewalla publishes no supported local REST API - the on-box
+  service on port 8833 is internal, undocumented, and needs an ETP token from
+  the app's Additional Pairing flow - so HomelabHero does not build against it.
+  The registry entry records the backend as `API=msp` so a local backend can be
+  added later without changing the format; `API=local` currently fails with an
+  explanation rather than guessing at an undocumented protocol.
+- API access requires an MSP account with an active plan.
+- There is no TLS pin here, unlike UniFi. The MSP is a public host with an
+  ordinary publicly-trusted certificate that Firewalla rotates on its own
+  schedule; pinning a certificate we do not control would break on renewal and
+  train people to re-accept pins on warning, which is worse than not pinning.
+  Normal CA validation applies and is always on.
+
+### Changed
+
+- The CLI now tells API-reached hosts apart by `PLATFORM` rather than by
+  `AUTH=apikey`. That test worked only while UniFi was the sole API platform:
+  with a second one, every API host looked like a UniFi console, and `hh test`,
+  `hh overview`, `hh inventory`, `hh doctor`, and bash completion would all have
+  handed a Firewalla to the UniFi broker. `PLATFORM` has been written into every
+  registry entry from the beginning, so hosts registered by older versions are
+  read correctly with no migration.
+
+### Fixed
+
+- Errors from the new broker report once, with the real reason. `die()` runs
+  `exit`, which ends only the subshell it is in, and bash's `errexit` does not
+  propagate out of a function that is itself running inside a command
+  substitution - so a failed box lookup nested in an argument let the caller
+  carry on with an empty value and fail again later with a worse message. Box
+  resolution is hoisted into plain assignments with explicit propagation, so an
+  MSP account with no boxes (or with several) now says exactly that, once.
+
 <a id="v1-2-1"></a>
 
 ## 1.2.1 (2026-08-15)

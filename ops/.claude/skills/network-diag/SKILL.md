@@ -29,9 +29,21 @@ covers the rest, including clients and VLANs.
 This is read-only: it diagnoses the fabric, it does not reconfigure it. UniFi
 changes are made by hand in the UniFi app.
 
-What UniFi cannot see, and this skill can: the NetBird mesh, DNS resolution,
-Cloudflare tunnels, and anything inside a host. A service can look perfectly
-healthy from the router and still be unreachable over the mesh.
+If a Firewalla is registered instead (or as well - `hh list` shows platform
+`firewalla`), ask it the same way:
+
+    hh firewalla summary             # box, WAN IP, device/rule/alarm counts
+    hh firewalla alarms              # anything the firewall flagged recently
+    hh firewalla devices             # every client, including things with no shell
+
+This is read-only too. Note that Firewalla is reached through the MSP cloud, not
+over the LAN, so a failure here can mean "no internet" rather than "firewall
+down" - ping the box's LAN IP to tell the two apart. The firewalla-ops skill
+covers the rest.
+
+What the router and firewall cannot see, and this skill can: the NetBird mesh,
+DNS resolution, Cloudflare tunnels, and anything inside a host. A service can
+look perfectly healthy from the router and still be unreachable over the mesh.
 
 ## Localize: is it reachability, name resolution, or the service
 

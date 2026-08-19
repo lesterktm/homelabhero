@@ -1,0 +1,488 @@
+#!/usr/bin/env bash
+#
+# hh-firewalla - HomelabHero Firewalla API broker.
+#
+# The third broker, alongside hh-connect (SSH) and hh-unifi (UniFi HTTPS). It
+# runs as the vault user (hhvault) through the same narrow sudoers rule, reads a
+# Firewalla API token the agent user cannot read, and queries a Firewalla box on
+# the operator's behalf. It never prints, echoes, or returns the token.
+#
+# READ-ONLY, BY CONSTRUCTION - and here that matters more than it does for
+# UniFi. The UniFi broker has two independent locks: it issues only GET, AND its
+# key is minted under a View Only admin that the console itself refuses writes
+# from. Firewalla has no View Only token tier at all. A personal access token
+# carries every permission the account has, and the API genuinely exposes
+# writes - creating rules, pausing and resuming them, deleting them, renaming
+# devices, deleting and muting alarms.
+#
+# So the second lock does not exist here, and the first one has to hold alone.
+# That is why _get() below takes no method argument: a read-only rule written in
+# a comment is a request, but a function that cannot express a write is a
+# guarantee. Every write-shaped op name is additionally refused by name at the
+# dispatch table, so a plausible-sounding "hh firewalla pause laptop" fails
+# loudly instead of finding some half-implemented path.
+#
+# The router is the one thing in the homelab whose failure takes away the very
+# access you would need to fix it. It is treated as a source of truth to read
+# and reason about, never as something to change. Changing the firewall stays
+# where it belongs: in the Firewalla app, done by a person.
+#
+# Usage: hh-firewalla <op> <alias> [args...]
+#
+# Argument order is op-first (hh-connect is alias-first) for the same reason as
+# hh-unifi: Claude's permission rules match on a command PREFIX, so op-first
+# means "hh firewalla devices ..." can be allowed while "hh firewalla get ..."
+# still asks. Alias-first would put a variable in the middle and make the rule
+# unable to tell one op from another.
+#
+set -euo pipefail
+
+REG_DIR="/etc/homelabhero/hosts.d"
+VAULT_DIR="/etc/homelabhero/vault"
+AUDIT_LOG="/var/log/homelabhero-broker.log"
+NAME_RE='^[A-Za-z0-9._-]+$'
+TIMEOUT=20
+
+# Firewalla exposes two different APIs, and which one a box answers on depends
+# on how it is managed. The registry records the choice as API= so the two never
+# get confused, and so a box can move between them by re-registering rather than
+# by this script guessing:
+#
+#   msp   - the cloud Managed Security Portal API, at your own portal domain
+#           (https://<yourname>.firewalla.net/v2/...), authenticated with a
+#           personal access token. Documented, versioned, and stable. This is
+#           the only backend implemented today.
+#   local - the box's own on-LAN API. Firewalla has no supported, documented
+#           local REST API: what exists is an internal service on port 8833
+#           that expects an ETP token obtained by abusing the app's "Additional
+#           Pairing" flow, with no published request or response shapes and no
+#           stability promise across firmware. Building against that would mean
+#           guessing, so it is deliberately NOT implemented. The seam is here so
+#           it can be added later without changing the registry format or any
+#           caller; see _get() and _base().
+API_KIND="msp"
+MSP_V2="/v2"
+
+die() { printf 'hh-firewalla: %s\n' "$*" >&2; exit 2; }
+
+[ "$#" -ge 2 ] || die "usage: hh-firewalla <op> <alias> [args...]"
+OP="$1"; ALIAS="$2"; shift 2
+
+[[ "$ALIAS" =~ $NAME_RE ]] || die "invalid alias"
+CONF="${REG_DIR}/${ALIAS}.conf"
+[ -f "$CONF" ] || die "no such registered host: ${ALIAS}"
+
+# Parse the registry entry safely (no sourcing). Only known keys are accepted.
+# Split on the FIRST '=' by hand rather than with IFS='=', because a value is
+# allowed to contain one.
+HOST=""; PORT="443"; AUTH=""; CRED=""; BOX=""; BOX_NAME=""; API=""
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|\#*) continue ;; *=*) : ;; *) continue ;; esac
+  key="${line%%=*}"; val="${line#*=}"
+  key="${key//[[:space:]]/}"
+  val="${val%\"}"; val="${val#\"}"; val="${val## }"; val="${val%% }"
+  case "$key" in
+    HOST)     HOST="$val" ;;
+    PORT)     PORT="$val" ;;
+    AUTH)     AUTH="$val" ;;
+    CRED)     CRED="$val" ;;
+    API)      API="$val" ;;
+    BOX)      BOX="$val" ;;
+    BOX_NAME) BOX_NAME="$val" ;;
+  esac
+done < "$CONF"
+
+[ "$AUTH" = "apitoken" ] || die "'${ALIAS}' is not a Firewalla API-token host (AUTH=${AUTH:-none}); use 'hh run ${ALIAS}' instead"
+[ -n "$HOST" ] || die "registry entry missing HOST"
+[ -n "$CRED" ] || die "registry entry missing CRED"
+[[ "$PORT" =~ ^[0-9]+$ ]] || die "invalid PORT"
+[[ "$CRED" =~ $NAME_RE ]] || die "invalid credential reference"
+
+[ -n "$API" ] && API_KIND="$API"
+case "$API_KIND" in
+  msp) : ;;
+  local) die "the local (on-box) Firewalla API is not implemented.
+    Firewalla publishes no supported local REST API - the on-box service on port
+    8833 is internal, undocumented, and needs an ETP token from the app's
+    Additional Pairing flow. HomelabHero will not guess at an undocumented
+    protocol on your firewall. Re-register this box against the MSP API instead:
+        hh rm-host ${ALIAS} && hh add-firewalla" ;;
+  *) die "unknown API backend '${API_KIND}' in the registry entry (expected: msp)" ;;
+esac
+
+# Same rule as the other brokers: never let the broker be turned inward on this
+# machine, which is where the vault lives.
+case "$HOST" in
+  127.*|::1|localhost|localhost.*) die "refusing loopback target" ;;
+esac
+
+CREDFILE="${VAULT_DIR}/${CRED}"
+[ -f "$CREDFILE" ] || die "credential not found in vault"
+case "$(readlink -f "$CREDFILE")" in
+  "${VAULT_DIR}/"*) : ;;
+  *) die "credential path escapes vault" ;;
+esac
+TOKEN="$(tr -d '\r\n' <"$CREDFILE")"
+[ -n "$TOKEN" ] || die "credential is empty"
+
+_base() {
+  case "$API_KIND" in
+    msp) printf 'https://%s:%s' "$HOST" "$PORT" ;;
+  esac
+}
+BASE="$(_base)"
+
+audit() { printf '%s\t%s\tFIREWALLA %s:%s\t%s\n' \
+  "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$ALIAS" "$HOST" "$PORT" "$*" \
+  >>"$AUDIT_LOG" 2>/dev/null || true; }
+
+# ---------------------------------------------------------------------------
+# HTTP
+
+# Perform one GET and print the response body. Dies with a plain-language
+# message on anything that is not a success status, because the caller of this
+# broker is usually an LLM relaying the result to a human.
+#
+# There is deliberately no method argument. See the header comment: with no
+# View Only token tier on Firewalla's side, this function being unable to
+# express a write is the whole of the guarantee.
+_get() {
+  local path="$1"
+  local args=(-sS -m "$TIMEOUT" -X GET -H 'Accept: application/json' -w '\n%{http_code}')
+
+  # Unlike a UniFi console, the MSP endpoint is a public host with an ordinary
+  # publicly-trusted certificate, so normal CA validation both applies and is
+  # the right check - no -k, and deliberately no key pinning. Pinning a cert we
+  # do not control would break on every routine renewal, which trains people to
+  # re-pin on warning, which is precisely the reflex that makes pinning
+  # worthless. (A future local backend talks to a self-signed box on the LAN and
+  # WOULD pin, exactly as hh-unifi does; that is why this lives behind the
+  # backend switch rather than being assumed once at the top.)
+  case "$API_KIND" in
+    msp) : ;;
+  esac
+
+  local errf resp rc=0
+  errf="$(mktemp)"
+  # The token goes in through a curl config file on stdin, never argv and never
+  # the environment. /proc/<pid>/cmdline is world readable, so a token passed as
+  # -H "Authorization: ..." would be readable by the very agent user this broker
+  # exists to keep it away from. printf is a shell builtin, so it does not leak
+  # through a process of its own either.
+  resp="$(printf 'header = "Authorization: Token %s"\n' "$TOKEN" \
+    | curl -K - "${args[@]}" "${BASE}${path}" 2>"$errf")" || rc=$?
+  local err; err="$(tr -d '\r' <"$errf")"; rm -f "$errf"
+
+  if [ "$rc" -ne 0 ]; then
+    case "$rc" in
+      28) die "timed out after ${TIMEOUT}s talking to ${HOST}" ;;
+      6)  die "cannot resolve ${HOST} (is the MSP domain spelled correctly?)" ;;
+      7)  die "cannot connect to ${HOST}:${PORT} (no route, or blocked outbound)" ;;
+      35|60) die "TLS failure talking to ${HOST}: ${err:-certificate not trusted}" ;;
+      *)  die "request failed (curl ${rc}): ${err:-no detail}" ;;
+    esac
+  fi
+
+  local code="${resp##*$'\n'}" out="${resp%$'\n'*}"
+  case "$code" in
+    2*) printf '%s' "$out" ;;
+    401|403) die "the Firewalla API token was rejected (HTTP ${code}).
+    Either the token is wrong or expired, or the MSP account has no active plan
+    (API access requires one). Create a new token in the MSP portal under
+    Account Settings -> Create New Token, then re-register from an admin shell:
+        hh rm-host ${ALIAS} && hh add-firewalla" ;;
+    404) die "no such API path on this MSP (HTTP 404): ${path}" ;;
+    429) die "rate limited by the MSP (HTTP 429); retry in a moment" ;;
+    *)   die "HTTP ${code} from ${path}: $(printf '%s' "$out" | tr -d '\n' | cut -c1-200)" ;;
+  esac
+}
+
+# The MSP API is not consistent about its envelope: /v2/boxes and /v2/devices
+# return a bare JSON array, while /v2/alarms and /v2/flows return
+# {count, results, next_cursor}. Normalise both to an array so every formatter
+# below can assume one shape, and so a response that is NEITHER is reported as
+# unexpected rather than silently printing as "nothing found" - those two look
+# identical to a reader and only one of them is true.
+JQ_ROWS='(if type == "array" then . elif has("results") then .results else null end)'
+
+# Note the explicit "|| exit" on assignments throughout this script, which looks
+# redundant next to `set -e`. It is not. errexit aborts a function that calls a
+# dying helper directly, but NOT when that function is itself running inside a
+# command substitution - there bash silently continues with an empty value, and
+# the failure resurfaces later as a second, worse error about the empty value
+# rather than the real one. Since _box and _this_box are both usually called as
+# "$(...)", every assignment that can die says so out loud.
+_rows() {
+  local j="$1" what="$2" out
+  out="$(printf '%s' "$j" | jq -c "${JQ_ROWS} // empty" 2>/dev/null)" || out=""
+  [ -n "$out" ] || die "unexpected response from ${what}: $(printf '%s' "$j" | tr -d '\n' | cut -c1-160)"
+  printf '%s' "$out"
+}
+
+# Epoch seconds -> readable UTC, tolerant of floats, nulls, and milliseconds.
+JQ_TS='def ts: if . == null or . == 0 then "-" else (if . > 100000000000 then ./1000 else . end | floor | todate) end;'
+
+# ---------------------------------------------------------------------------
+# Box resolution
+#
+# Nearly every homelab has exactly one Firewalla, but the MSP API is a fleet API
+# and addresses everything by box id (gid). Resolve it once and cache it back
+# into the registry entry, which is non-secret and owned by the vault user, so
+# later calls skip the lookup.
+
+# Rewrite one key in the registry entry, atomically and without needing write
+# permission on the file itself. The entry is written by `hh add-firewalla` as
+# root (mode 644) but lives in a directory owned by the vault user, so
+# redirecting onto it fails: truncating a file needs permission on the FILE,
+# while replacing it needs permission on the DIRECTORY, which is what we have.
+# Hence a temp file in the SAME directory followed by a rename.
+#
+# This is a cache, never a source of truth: if it cannot be written the lookup
+# simply happens again next time, so failure here is silent on purpose.
+_remember() {
+  local key="$1" val="$2" tmp
+  tmp="$(mktemp "${REG_DIR}/.${ALIAS}.XXXXXX" 2>/dev/null)" || return 0
+  {
+    grep -v "^${key}=" "$CONF" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$val"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$CONF" 2>/dev/null || rm -f "$tmp"
+  return 0
+}
+
+_boxes_json() { _get "${MSP_V2}/boxes"; }
+
+_box() {
+  if [ -z "$BOX" ]; then
+    local j rows n
+    j="$(_boxes_json)" || exit $?
+    rows="$(_rows "$j" "${MSP_V2}/boxes")" || exit $?
+    n="$(printf '%s' "$rows" | jq -r 'length')" || exit $?
+    case "$n" in
+      0) die "this MSP account has no Firewalla boxes in it" ;;
+      1) : ;;
+      *) die "this MSP account manages ${n} boxes; HomelabHero registers one box per
+    alias. Re-register naming the one you mean (its gid is in 'hh firewalla
+    boxes'), from an admin shell: hh rm-host ${ALIAS} && hh add-firewalla" ;;
+    esac
+    BOX="$(printf '%s' "$rows" | jq -r '.[0].gid // empty')"
+    [ -n "$BOX" ] || die "the MSP returned a box with no gid"
+    BOX_NAME="$(printf '%s' "$rows" | jq -r '.[0].name // "Firewalla"')"
+    _remember BOX "$BOX"
+    _remember BOX_NAME "$BOX_NAME"
+  fi
+  printf '%s' "$BOX"
+}
+
+# The one box this alias refers to, as a JSON object.
+#
+# Every step is a plain assignment on its own line, deliberately. die() runs
+# `exit`, and an `exit` inside a command substitution ends only that subshell -
+# so a die() nested in an ARGUMENT (jq --arg g "$(_box)") lets the surrounding
+# command carry on with an empty value and fail a second time, further away,
+# with a worse message. Written this way, `set -e` sees each failure directly
+# and the first message is the only message.
+_this_box() {
+  local g j rows
+  g="$(_box)" || exit $?
+  j="$(_boxes_json)" || exit $?
+  rows="$(_rows "$j" "${MSP_V2}/boxes")" || exit $?
+  printf '%s' "$rows" | jq -c --arg g "$g" '(map(select(.gid == $g)) | .[0]) // empty'
+}
+
+# URL-encode a query value. The qualifier syntax is documented as
+# "field:value", and a gid is a UUID, so only the colon and a handful of
+# separators can appear - but encode properly rather than assuming.
+_urlenc() { jq -rn --arg s "$1" '$s|@uri'; }
+
+# ---------------------------------------------------------------------------
+# Ops
+
+op_boxes() {
+  local j rows
+  j="$(_boxes_json)" || exit $?
+  rows="$(_rows "$j" "${MSP_V2}/boxes")" || exit $?
+  printf '%s' "$rows" | jq -r "${JQ_TS}"'.[] |
+      "\(.name // "?")\t\(.model // "?")\t\(.mode // "-")\t\(if .online then "online" else "OFFLINE" end)\t\(.version // "-")\t\(.gid // "-")"' \
+    | awk -F'\t' 'BEGIN{printf "%-22s %-10s %-9s %-9s %-14s %s\n","NAME","MODEL","MODE","STATE","VERSION","GID"}
+                  {printf "%-22s %-10s %-9s %-9s %-14s %s\n",$1,$2,$3,$4,$5,$6}'
+}
+
+op_info() { _this_box; }
+
+op_ping() {
+  local b name model ver
+  b="$(_this_box)" || exit $?
+  [ -n "$b" ] || die "the MSP does not list box ${BOX} any more (was it removed from the account?)"
+  name="$(printf '%s' "$b" | jq -r '.name // "Firewalla"')"
+  model="$(printf '%s' "$b" | jq -r '.model // "?"')"
+  ver="$(printf '%s' "$b" | jq -r '.version // "?"')"
+  printf 'firewalla-ok %s (%s, v%s)\n' "$name" "$model" "$ver"
+}
+
+op_devices() {
+  local box j rows
+  box="$(_box)" || exit $?
+  j="$(_get "${MSP_V2}/devices?box=$(_urlenc "$box")")" || exit $?
+  rows="$(_rows "$j" "devices")" || exit $?
+  printf '%s' "$rows" | jq -r "${JQ_TS}"'.[] |
+      "\(.name // "?")\t\(.ip // "-")\t\(.id // "-")\t\(.network.name // "-")\t\(if .online then "online" else "offline" end)\t\(.lastSeen | ts)"' \
+    | sort -t"$(printf '\t')" -k5,5 -k1,1 \
+    | awk -F'\t' 'BEGIN{printf "%-26s %-16s %-18s %-14s %-8s %s\n","NAME","IP","MAC","NETWORK","STATE","LAST SEEN"}
+                  {printf "%-26s %-16s %-18s %-14s %-8s %s\n",$1,$2,$3,$4,$5,$6}'
+}
+
+# One device in full. The MSP API documents no per-device GET, so select it out
+# of the device list by MAC or by name rather than inventing an endpoint.
+op_device() {
+  [ "$#" -ge 1 ] || die "usage: hh firewalla device [alias] <mac|name>"
+  local box j rows hit
+  box="$(_box)" || exit $?
+  j="$(_get "${MSP_V2}/devices?box=$(_urlenc "$box")")" || exit $?
+  rows="$(_rows "$j" "devices")" || exit $?
+  hit="$(printf '%s' "$rows" | jq --arg q "$1" '
+    map(select((.id // "" | ascii_downcase) == ($q | ascii_downcase)
+            or (.name // "" | ascii_downcase) == ($q | ascii_downcase)
+            or (.ip // "") == $q)) | .[0] // empty')"
+  [ -n "$hit" ] || die "no device matching '$1' (try 'hh firewalla devices' for the list)"
+  printf '%s\n' "$hit"
+}
+
+op_alarms() {
+  local n="${1:-20}"
+  [[ "$n" =~ ^[0-9]+$ ]] || die "usage: hh firewalla alarms [alias] [limit]"
+  [ "$n" -le 500 ] || die "limit must be 500 or less (the API caps it there)"
+  local box j rows
+  box="$(_box)" || exit $?
+  j="$(_get "${MSP_V2}/alarms?query=$(_urlenc "box.id:${box}")&limit=${n}&sortBy=ts:desc")" || exit $?
+  rows="$(_rows "$j" "alarms")" || exit $?
+  if [ "$(printf '%s' "$rows" | jq -r 'length')" = "0" ]; then
+    echo "No active alarms."; return 0
+  fi
+  printf '%s' "$rows" | jq -r "${JQ_TS}"'.[] |
+      "\(.ts | ts)\t\(.type // "-")\t\(.device.name // .device.id // "-")\t\((.message // .detail // "-") | gsub("[\n\t]"; " "))"' \
+    | awk -F'\t' 'BEGIN{printf "%-21s %-6s %-22s %s\n","WHEN","TYPE","DEVICE","WHAT"}
+                  {printf "%-21s %-6s %-22s %s\n",$1,$2,$3,substr($4,1,70)}'
+}
+
+op_flows() {
+  local n="${1:-30}"
+  [[ "$n" =~ ^[0-9]+$ ]] || die "usage: hh firewalla flows [alias] [limit]"
+  [ "$n" -le 500 ] || die "limit must be 500 or less (the API caps it there)"
+  local box j rows
+  box="$(_box)" || exit $?
+  j="$(_get "${MSP_V2}/flows?query=$(_urlenc "box.id:${box}")&limit=${n}&sortBy=ts:desc")" || exit $?
+  rows="$(_rows "$j" "flows")" || exit $?
+  printf '%s' "$rows" | jq -r "${JQ_TS}"'.[] |
+      "\(.ts | ts)\t\(.device.name // .device.id // "-")\t\(.domain // .destination.name // .destination.ip // "-")\t\(.category // "-")\t\(.block // false | if . then "BLOCKED" else "allowed" end)\t\(((.download // 0) + (.upload // 0)) / 1048576 * 100 | floor / 100)"' \
+    | awk -F'\t' 'BEGIN{printf "%-21s %-20s %-30s %-10s %-8s %s\n","WHEN","DEVICE","DESTINATION","CATEGORY","ACTION","MB"}
+                  {printf "%-21s %-20s %-30s %-10s %-8s %s\n",$1,$2,substr($3,1,30),$4,$5,$6}'
+}
+
+op_rules() {
+  local box j rows
+  box="$(_box)" || exit $?
+  j="$(_get "${MSP_V2}/rules?query=$(_urlenc "box.id:${box}")")" || exit $?
+  rows="$(_rows "$j" "rules")" || exit $?
+  if [ "$(printf '%s' "$rows" | jq -r 'length')" = "0" ]; then
+    echo "No rules configured on this box."; return 0
+  fi
+  printf '%s' "$rows" | jq -r '.[] |
+      "\(.action // "-")\t\(.target.type // "-")\t\((.target.value // "-") | tostring)\t\(.scope.value // .scope.type // "all devices")\t\(.status // "-")\t\(.id // "-")"' \
+    | awk -F'\t' 'BEGIN{printf "%-7s %-10s %-28s %-20s %-9s %s\n","ACTION","TARGET","VALUE","SCOPE","STATUS","ID"}
+                  {printf "%-7s %-10s %-28s %-20s %-9s %s\n",$1,$2,substr($3,1,28),substr($4,1,20),$5,$6}'
+}
+
+op_targetlists() {
+  local j rows
+  j="$(_get "${MSP_V2}/target-lists")" || exit $?
+  rows="$(_rows "$j" "target-lists")" || exit $?
+  printf '%s' "$rows" | jq -r '.[] |
+      "\(.name // "?")\t\(.owner // "msp")\t\((.targets // []) | length)\t\(.category // "-")\t\(.id // "-")"' \
+    | awk -F'\t' 'BEGIN{printf "%-30s %-10s %-8s %-12s %s\n","NAME","OWNER","ENTRIES","CATEGORY","ID"}
+                  {printf "%-30s %-10s %-8s %-12s %s\n",$1,$2,$3,$4,$5}'
+}
+
+op_stats() { _get "${MSP_V2}/stats/simple"; }
+
+# The compact block hh overview and hh inventory print.
+#
+# Note on error handling: die() runs `exit`, and an `exit` inside a command
+# substitution ends that subshell outright - an `|| true` written INSIDE the
+# substitution never runs, so it catches nothing. Every tolerated call below
+# therefore puts its fallback OUTSIDE the substitution, where it sees the real
+# status.
+op_summary() {
+  local b box alarms
+
+  # Deliberately NOT tolerated: if the MSP cannot be reached or the token is
+  # refused, that is the answer, and it should be reported rather than papered
+  # over with a header and a set of blank sections.
+  b="$(_this_box)" || exit $?
+  [ -n "$b" ] || die "the MSP does not list box ${BOX} any more (was it removed from the account?)"
+
+  # No "# alias (firewalla)" banner here: hh overview and hh inventory already
+  # print one, and repeating it makes every box appear twice.
+  printf '%s' "$b" | jq -r "${JQ_TS}"'
+    "Box       \(.name // "Firewalla")   \(.model // "?")   v\(.version // "?")   mode \(.mode // "?")   \(if .online then "online" else "OFFLINE" end)",
+    "WAN       public IP \(.publicIP // "?")\(if .location then "   (\(.location))" else "" end)   last seen \(.lastSeen | ts)",
+    "Counts    \(.deviceCount // 0) devices, \(.ruleCount // 0) rules, \(.alarmCount // 0) active alarm\(if (.alarmCount // 0) == 1 then "" else "s" end)"'
+
+  # The most recent alarms are the single most useful thing to surface without
+  # being asked, but they cost a second call, so a failure here must not take
+  # the whole summary down with it.
+  box="$(_box)" || exit $?
+  if alarms="$(_get "${MSP_V2}/alarms?query=$(_urlenc "box.id:${box}")&limit=3&sortBy=ts:desc" 2>/dev/null)"; then
+    printf '%s' "$alarms" | jq -r "${JQ_TS}${JQ_ROWS}"' // [] | .[] |
+      "Alarm     \(.ts | ts)  \(.type // "-")  \((.message // .detail // "-") | gsub("[\n\t]"; " ") | .[0:64])"' 2>/dev/null || true
+  fi
+}
+
+# Escape hatch: any GET under /v2/. This covers everything the named ops do not
+# - trends, per-type statistics, a hand-written query filter - without this
+# broker having to grow an op per endpoint, and without giving up the read-only
+# guarantee, since it can still only issue a GET.
+op_get() {
+  [ "$#" -ge 1 ] || die "usage: hh firewalla get [alias] </v2/...>   ({box} is expanded to this box's gid)"
+  local p="$1" box
+  case "$p" in *'{box}'*) box="$(_box)" || exit $?; p="${p//\{box\}/${box}}" ;; esac
+  case "$p" in
+    /v2/*) : ;;
+    *) die "path must start with /v2/ (got: ${p})" ;;
+  esac
+  case "$p" in *..*) die "path may not contain '..'" ;; esac
+  _get "$p"
+}
+
+audit "$OP $*"
+
+case "$OP" in
+  ping)        op_ping ;;
+  info)        op_info ;;
+  summary)     op_summary ;;
+  boxes)       op_boxes ;;
+  devices)     op_devices ;;
+  device)      op_device "$@" ;;
+  alarms)      op_alarms "$@" ;;
+  flows)       op_flows "$@" ;;
+  rules)       op_rules ;;
+  targetlists) op_targetlists ;;
+  stats)       op_stats ;;
+  get)         op_get "$@" ;;
+  # Every op above is a GET. There is no write op, and adding one would mean
+  # adding a write path to _get, which is the line this broker does not cross.
+  #
+  # These are named explicitly because they are the ones that EXIST in the
+  # Firewalla API and would otherwise sound implementable. Refusing them by name
+  # turns a plausible guess into a clear answer instead of an obscure error.
+  pause|resume|block|unblock|allow|create|delete|rm|archive|mute|rename|set|update|reboot|restart|raw|post|put|patch)
+    die "this broker is read-only: it can only read from Firewalla, never change it.
+    '${OP}' would change your firewall - and unlike UniFi, a Firewalla API token
+    has no View Only tier, so this broker refusing is the ONLY thing standing
+    between a mistake and your network. It is not implemented here at all.
+    Make the change in the Firewalla app yourself. HomelabHero can tell you
+    exactly what to change and why, and confirm the result afterwards with
+    'hh firewalla rules' or 'hh firewalla summary'." ;;
+  *) die "unknown op: ${OP} (ping info summary boxes devices device alarms flows rules targetlists stats get)" ;;
+esac
