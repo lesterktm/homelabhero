@@ -59,6 +59,14 @@ Firewalla joins UniFi as a network appliance HomelabHero can read.
   already did for a UniFi console. Without it, an API-token host fell through to
   "unknown AUTH type: apitoken" from the bottom of the SSH broker.
 
+- `hh provision` refuses `platform=firewalla` with a reason, the way it already
+  did for `unifi`. It always failed closed, but through the catch-all, whose text
+  named only linux/truenas/proxmox and left the reader with no idea Firewalla was
+  supported at all. It now says that an MSP token cannot be handled from a chat
+  session, and that a Firewalla is addressed by its MSP portal domain rather than
+  the LAN host this command takes - so there is nothing here to register even
+  setting the secret aside. The catch-all names both appliances too.
+
 `hh scan` deliberately does not learn to find a Firewalla. Registration needs an
 MSP portal domain rather than a LAN address, so there is nothing a subnet sweep
 could hand to `hh add-firewalla`; the box still shows up in a scan as a gateway.

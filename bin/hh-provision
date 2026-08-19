@@ -44,7 +44,15 @@ case "$PLAT" in
   unifi) die "a UniFi console is registered with an API key, which cannot be handled
     safely from the chat. Ask the operator to run this in an admin shell:
         hh add-unifi" ;;
-  *) die "platform must be linux, truenas, or proxmox (a UniFi console uses hh add-unifi)" ;;
+  # A Firewalla is refused for the same reason, plus one of its own: it is
+  # addressed by its MSP portal domain, not by the LAN host this command takes,
+  # so there is nothing sensible to register from here even without the secret.
+  firewalla) die "a Firewalla is registered with an MSP API token, which cannot be
+    handled safely from the chat, and it is reached at its MSP portal domain
+    rather than a LAN address. Ask the operator to run this in an admin shell:
+        hh add-firewalla" ;;
+  *) die "platform must be linux, truenas, or proxmox
+    (a UniFi console uses hh add-unifi; a Firewalla uses hh add-firewalla)" ;;
 esac
 [ -e "${REG_DIR}/${ALIAS}.conf" ] && die "alias '${ALIAS}' already registered"
 
