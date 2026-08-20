@@ -84,6 +84,15 @@ Use this to answer "what is that device talking to", "what is using bandwidth",
 and "was that connection actually blocked". Note that flow retention depends on
 the MSP plan - some tiers keep 24 hours, others 30 days.
 
+## Bandwidth - who is eating the internet
+
+- Top devices by traffic over the last 24 hours: `hh firewalla bandwidth [limit]`
+  (default 10, max 500; device, IP, down MB, up MB, total MB)
+
+This is one grouped query rather than reading `flows` and adding it up by hand,
+and it is scoped to this box. Reach for it on "why is the internet slow" before
+anything else.
+
 ## Rules and blocklists
 
 - Configured firewall rules: `hh firewalla rules`
@@ -94,9 +103,32 @@ Reading rules is how you check whether a block is actually in place, and
 whether a rule is `active` or `paused`. A paused rule explains a surprising
 amount of "I thought I blocked that".
 
+## Trends over time
+
+- Daily counts: `hh firewalla trends <flows|alarms|rules>`
+  (`flows` = blocked flows per day, `alarms` = alarms raised per day,
+  `rules` = rules created per day)
+
+**Read the header line this prints.** Unlike everything else here, trends
+CANNOT be narrowed to one box: `/v2/trends/<type>` accepts only a `group`
+parameter (a box *group* id) and returns global figures otherwise. So on a
+multi-box account these numbers cover every box, and the command says so
+explicitly rather than letting you read them as this box's. If the box belongs
+to a group, that group is used and the header names it.
+
+Do not quote a trend figure as a single box's unless the header says it is.
+
 ## Statistics
 
 - Account-level rollup: `hh firewalla stats`
+- Leaderboards: `hh firewalla stats <type>`, where type is
+  `topBoxesByBlockedFlows`, `topBoxesBySecurityAlarms`, or
+  `topRegionsByBlockedFlows`
+
+These three compare boxes or regions against each other, so they are
+account-wide by nature - narrowing "top boxes" to one box would mean nothing.
+That is a different thing from the trends limitation above: here account-wide
+is the point, not a constraint.
 
 ## Anything else (raw GET)
 

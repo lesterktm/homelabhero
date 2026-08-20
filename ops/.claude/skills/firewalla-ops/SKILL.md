@@ -69,13 +69,17 @@ that risk.
     hh firewalla alarms [n]     security events, newest first (default 20)
     hh firewalla flows [n]      recent connections: device, destination,
                                 category, blocked or allowed, MB (default 30)
+    hh firewalla bandwidth [n]  top devices by traffic, last 24h (default 10)
+    hh firewalla trends <type>  daily flows/alarms/rules counts over time
     hh firewalla devices        every client: name, IP, MAC, network, state
     hh firewalla device <q>     one device in full, by MAC, name, or IP
     hh firewalla rules          firewall rules: action, target, scope, status
     hh firewalla targetlists    blocklists and allowlists rules are built from
     hh firewalla boxes          every box on the MSP account
     hh firewalla info           full box record as JSON
-    hh firewalla stats          account-level rollup
+    hh firewalla stats [type]   account rollup, or a leaderboard: type is
+                                topBoxesByBlockedFlows, topBoxesBySecurityAlarms,
+                                or topRegionsByBlockedFlows
     hh firewalla ping           reachability check
     hh firewalla get <path>     any other GET under /v2/ ({box} is expanded)
 
@@ -97,6 +101,19 @@ Firewalla answers questions nothing else in the homelab can:
   explains a surprising amount of "I thought I blocked that".
 - **"What is on my network?"** -> `hh firewalla devices` sees phones, TVs,
   cameras, and everything else that never appears in a host inventory.
+
+## The one number you must not misreport
+
+`hh firewalla trends` is the only op here that is NOT scoped to this box. The
+MSP trends endpoint has no box filter - it takes a box *group* at best and is
+account-wide otherwise. The command prints what its figures actually cover on
+the first line.
+
+Read that line before repeating a number. On a multi-box account, saying "your
+firewall blocked 71 flows yesterday" when the figure covers every box on the
+account is a wrong answer delivered confidently, which is worse than saying you
+cannot break it down per box. Every other op - bandwidth, flows, alarms, rules,
+devices - is genuinely this box only.
 
 ## Reading the results well
 

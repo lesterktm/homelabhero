@@ -9,7 +9,7 @@
 #
 set -euo pipefail
 
-HH_VERSION="1.3.0"
+HH_VERSION="1.4.0"
 REG_DIR="/etc/homelabhero/hosts.d"
 VAULT_DIR="/etc/homelabhero/vault"
 VAULT_USER="hhvault"
@@ -49,7 +49,8 @@ HomelabHero
                                read your Firewalla over the MSP API.
                                  READ-ONLY: it can never change your firewall.
                                  ops: summary ping info boxes devices device
-                                      alarms flows rules targetlists stats get
+                                      alarms flows bandwidth trends rules
+                                      targetlists stats get
                                  alias may be omitted with one box
   hh doctor                    check the whole setup is healthy
   hh diff [alias]              inventory drift vs the last saved snapshot
@@ -172,7 +173,7 @@ _firewalla_default() {
 
 cmd_firewalla() {
   local op="${1:-}"; shift || true
-  [ -n "$op" ] || die "usage: hh firewalla <op> [alias] [args]  (ops: summary ping info boxes devices device alarms flows rules targetlists stats get)"
+  [ -n "$op" ] || die "usage: hh firewalla <op> [alias] [args]  (ops: summary ping info boxes devices device alarms flows bandwidth trends rules targetlists stats get)"
   local alias=""
   if [ -n "${1:-}" ] && _is_firewalla "${1}"; then alias="$1"; shift; else alias="$(_firewalla_default)"; fi
   exec sudo -n -H -u "$VAULT_USER" "$FIREWALLA_BROKER" "$op" "$alias" "$@"

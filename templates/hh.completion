@@ -37,7 +37,7 @@ _hh() {
       # hh firewalla <op> [alias]: same shape as unifi, and every op is
       # read-only. There is no write op to complete because none exists.
       if [ "$COMP_CWORD" -eq 2 ]; then
-        mapfile -t COMPREPLY < <(compgen -W "summary ping info boxes devices device alarms flows rules targetlists stats get" -- "$cur")
+        mapfile -t COMPREPLY < <(compgen -W "summary ping info boxes devices device alarms flows bandwidth trends rules targetlists stats get" -- "$cur")
       elif [ "$COMP_CWORD" -eq 3 ]; then
         aliases="$(cd /etc/homelabhero/hosts.d 2>/dev/null && \
           for f in *.conf; do [ -e "$f" ] && grep -q '^PLATFORM=firewalla$' "$f" && printf '%s\n' "${f%.conf}"; done)"

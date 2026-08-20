@@ -29,6 +29,9 @@
 #
 # Usage: hh-firewalla <op> <alias> [args...]
 #
+# Ops: ping info summary boxes devices device alarms flows bandwidth trends
+#      rules targetlists stats get
+#
 # Argument order is op-first (hh-connect is alias-first) for the same reason as
 # hh-unifi: Claude's permission rules match on a command PREFIX, so op-first
 # means "hh firewalla devices ..." can be allowed while "hh firewalla get ..."
@@ -388,6 +391,86 @@ op_flows() {
                   {printf "%-21s %-20s %-30s %-10s %-8s %s\n",$1,$2,substr($3,1,30),$4,$5,$6}'
 }
 
+# Top devices by traffic over the last 24 hours - the question people actually
+# ask of a router ("what is eating the internet"), as one grouped query instead
+# of scanning flows by hand. Box-scoped like every other per-box op here: the
+# flows endpoint documents box.id as a query qualifier, so this really is only
+# this box's traffic.
+#
+# No explicit ts filter, deliberately. /v2/flows documents that a query with no
+# timestamp already covers the last 24 hours, which is exactly the window this
+# op wants. Spelling out a range instead would mean guessing at range syntax the
+# API reference never shows, and a malformed qualifier here does not fail loudly
+# - it comes back as the wrong window, silently, which is the one outcome worth
+# engineering against.
+op_bandwidth() {
+  local n="${1:-10}"
+  [[ "$n" =~ ^[0-9]+$ ]] || die "usage: hh firewalla bandwidth [alias] [limit]"
+  [ "$n" -le 500 ] || die "limit must be 500 or less (the API caps it there)"
+  local box j rows
+  box="$(_box)" || exit $?
+  j="$(_get "${MSP_V2}/flows?query=$(_urlenc "box.id:${box}")&groupBy=device&sortBy=total:desc&limit=${n}")" || exit $?
+  rows="$(_rows "$j" "flows")" || exit $?
+  echo "Top ${n} devices by traffic, last 24 hours:"
+  # Prefer the API's own total where the grouped row carries one, and fall back
+  # to down+up where it does not.
+  printf '%s' "$rows" | jq -r 'def mb: (. / 1048576 * 100 | floor) / 100;
+    .[] |
+      "\(.device.name // .device.id // "?")\t\(.device.ip // "-")\t\((.download // 0) | mb)\t\((.upload // 0) | mb)\t\((.total // ((.download // 0) + (.upload // 0))) | mb)"' \
+    | awk -F'\t' 'BEGIN{printf "%-26s %-16s %10s %10s %10s\n","DEVICE","IP","DOWN MB","UP MB","TOTAL MB"}
+                  {printf "%-26s %-16s %10s %10s %10s\n",$1,$2,$3,$4,$5}'
+}
+
+# Daily trend counts for flows, alarms, or rules.
+#
+# This op is the one exception to box scoping in this file, and NOT by oversight.
+# /v2/trends/<type> documents exactly one parameter - `group`, a box GROUP id -
+# and states that it "returns global statistics by default". There is no box.id
+# qualifier, and no `query` parameter to put one in.
+#
+# That matters because the failure is silent. Passing a query filter anyway does
+# not error: the API ignores the unknown parameter and returns account-wide
+# numbers, which then get printed under a command the user invoked for one box.
+# Wrong data wearing the right label is worse than no data, so this op uses the
+# only scope the API actually offers - the box's group, when it belongs to one -
+# and states in its header exactly what the figures cover.
+op_trends() {
+  local what="${1:-}"
+  case "$what" in
+    flows|alarms|rules) : ;;
+    *) die "usage: hh firewalla trends [alias] <flows|alarms|rules>" ;;
+  esac
+  local box bj brows n group path scope j rows
+  box="$(_box)" || exit $?
+  bj="$(_boxes_json)" || exit $?
+  brows="$(_rows "$bj" "${MSP_V2}/boxes")" || exit $?
+  n="$(printf '%s' "$brows" | jq -r 'length')" || exit $?
+  # The group field is nullable and its shape is not pinned down in the docs, so
+  # accept either an object with an id or a bare string.
+  group="$(printf '%s' "$brows" | jq -r --arg g "$box" '
+    ((map(select(.gid == $g)) | .[0].group)) as $grp
+    | if $grp == null then ""
+      elif ($grp | type) == "object" then ($grp.id // "")
+      else ($grp | tostring) end')" || exit $?
+
+  path="${MSP_V2}/trends/${what}"
+  if [ -n "$group" ]; then
+    path="${path}?group=$(_urlenc "$group")"
+    scope="the box group '${group}' this box belongs to"
+  elif [ "$n" -le 1 ]; then
+    scope="this account's only box"
+  else
+    scope="ALL ${n} boxes on this account, not just this one (the trends API cannot filter by box)"
+  fi
+
+  j="$(_get "$path")" || exit $?
+  rows="$(_rows "$j" "trends/${what}")" || exit $?
+  printf 'Daily %s, covering %s.\n' "$what" "$scope"
+  printf '%s' "$rows" | jq -r "${JQ_TS}"'
+    sort_by(.ts) | .[] | "\(.ts | ts | .[0:10])\t\(.value // 0)"' \
+    | awk -F'\t' -v w="$what" 'BEGIN{printf "%-12s %s\n","DAY",toupper(w)} {printf "%-12s %s\n",$1,$2}'
+}
+
 op_rules() {
   local box j rows
   box="$(_box)" || exit $?
@@ -412,7 +495,27 @@ op_targetlists() {
                   {printf "%-30s %-10s %-8s %-12s %s\n",$1,$2,$3,$4,$5}'
 }
 
-op_stats() { _get "${MSP_V2}/stats/simple"; }
+# No argument: the account-level rollup this has always returned. With one of
+# the three named breakdowns: a leaderboard instead.
+#
+# These three are deliberately NOT box-scoped, and that is not the same omission
+# as trends above. They are inherently cross-box comparisons - "top BOXES by
+# blocked flows", "top REGIONS" - so narrowing them to a single box would not
+# just be unsupported, it would be meaningless.
+op_stats() {
+  local what="${1:-}"
+  case "$what" in
+    "") _get "${MSP_V2}/stats/simple"; return ;;
+    topBoxesByBlockedFlows|topBoxesBySecurityAlarms|topRegionsByBlockedFlows) : ;;
+    *) die "usage: hh firewalla stats [alias] [topBoxesByBlockedFlows|topBoxesBySecurityAlarms|topRegionsByBlockedFlows]
+    With no argument it returns the account-level rollup." ;;
+  esac
+  local j rows
+  j="$(_get "${MSP_V2}/stats/${what}")" || exit $?
+  rows="$(_rows "$j" "stats/${what}")" || exit $?
+  printf '%s' "$rows" | jq -r '.[] | "\(.meta.name // .meta.code // .meta.gid // "?")\t\(.value // 0)"' \
+    | awk -F'\t' 'BEGIN{printf "%-30s %s\n","NAME","VALUE"} {printf "%-30s %s\n",$1,$2}'
+}
 
 # The compact block hh overview and hh inventory print.
 #
@@ -474,9 +577,11 @@ case "$OP" in
   device)      op_device "$@" ;;
   alarms)      op_alarms "$@" ;;
   flows)       op_flows "$@" ;;
+  bandwidth)   op_bandwidth "$@" ;;
+  trends)      op_trends "$@" ;;
   rules)       op_rules ;;
   targetlists) op_targetlists ;;
-  stats)       op_stats ;;
+  stats)       op_stats "$@" ;;
   get)         op_get "$@" ;;
   # Every op above is a GET. There is no write op, and adding one would mean
   # adding a write path to _get, which is the line this broker does not cross.
@@ -492,5 +597,6 @@ case "$OP" in
     Make the change in the Firewalla app yourself. HomelabHero can tell you
     exactly what to change and why, and confirm the result afterwards with
     'hh firewalla rules' or 'hh firewalla summary'." ;;
-  *) die "unknown op: ${OP} (ping info summary boxes devices device alarms flows rules targetlists stats get)" ;;
+  *) die "unknown op: ${OP} (ping info summary boxes devices device alarms flows
+    bandwidth trends rules targetlists stats get)" ;;
 esac

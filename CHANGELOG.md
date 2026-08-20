@@ -24,6 +24,63 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-4-0"></a>
+
+## 1.4.0 (2026-08-20)
+
+Three more Firewalla reads, ported from upstream and re-scoped to one box.
+
+### Added
+
+- `hh firewalla bandwidth [limit]` - top devices by traffic over the last 24
+  hours (device, IP, down, up, total), as one grouped query rather than reading
+  `flows` and adding it up by hand. Scoped to this alias's box: the flows
+  endpoint documents `box.id` as a query qualifier, so this really is only this
+  box's traffic. It sends no explicit time filter, because `/v2/flows` already
+  defaults to the last 24 hours and the API reference never spells out its range
+  syntax - a malformed time qualifier does not fail, it silently returns the
+  wrong window.
+
+- `hh firewalla trends <flows|alarms|rules>` - daily counts over time.
+
+- `hh firewalla stats <type>` - leaderboards, where type is
+  `topBoxesByBlockedFlows`, `topBoxesBySecurityAlarms`, or
+  `topRegionsByBlockedFlows`. `hh firewalla stats` with no argument still
+  returns the account-level rollup exactly as before. These three compare boxes
+  and regions against each other, so they are account-wide by nature; narrowing
+  "top boxes" to one box would mean nothing.
+
+### Trends cannot be scoped to a box, and says so
+
+Every other per-box op here filters on `box.id`. Trends cannot: the MSP
+reference documents exactly one parameter for `/v2/trends/<type>` - `group`, a
+box *group* id - and states that it "returns global statistics by default".
+There is no `box.id` qualifier and no `query` parameter to carry one.
+
+The trap is that filtering anyway does not fail. An unknown parameter is
+ignored, account-wide numbers come back, and they get printed under a command
+the user ran for one box. So this op does not pretend: it uses the only scope
+the API offers (the box's group, when it has one) and prints what the figures
+actually cover as its first line - naming the group, or saying plainly that the
+numbers span all N boxes on the account. The skill and capability doc both tell
+Claude to read that line before quoting a trend figure as one box's.
+
+### Changed
+
+- `HH_VERSION` is 1.4.0, which also catches up the box-picker fix in 072ac71
+  that landed without a version bump.
+
+  Note that this fork's 1.3.0 and upstream's 1.3.0 are different code. Upstream
+  shipped its own Firewalla support on 2026-08-20; this fork had already used
+  1.3.0 for the version built here. The two are independent implementations that
+  happen to share a number.
+
+### Fixed
+
+- `hh firewalla stats <type>` reached its argument at all. The dispatch entry
+  still read `op_stats` without passing `"$@"` from when the op took no
+  arguments, so every named type silently returned the account rollup instead.
+
 <a id="v1-3-0"></a>
 
 ## 1.3.0 (2026-08-18)
