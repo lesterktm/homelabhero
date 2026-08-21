@@ -506,12 +506,20 @@ op_targetlists() {
   # all built-ins means an empty table. All three are named here on purpose.
   j="$(_get "${MSP_V2}/target-lists?owner=$(_urlenc "global,firewalla,${box}")")" || exit $?
   rows="$(_rows "$j" "target-lists")" || exit $?
+  # ENTRIES prefers the row's own `count`, which the API sends inline for every
+  # list, and falls back to counting an inlined `targets` array. The built-in
+  # lists carry a count but no targets - OISD alone is ~59k domains, so inlining
+  # them per row would be absurd - and counting the absent array reported every
+  # one of them as 0, which reads as "this list is empty" rather than "we were
+  # not told". A count of 0 from the API is a real zero and passes through: jq's
+  # // only falls through on null and false.
+  #
   # Owner comes back as a raw gid for a box-owned list, which is 36 characters of
   # column-wrecking noise that tells the reader nothing they did not just ask
   # for. Rewrite that one case; "global" and "firewalla" already read correctly
   # as themselves and fall through deliberately.
   printf '%s' "$rows" | jq -r --arg g "$box" '.[] |
-      "\(.name // "?")\t\(if .owner == $g then "this box" elif (.owner // "") == "global" then "global" else (.owner // "-") end)\t\((.targets // []) | length)\t\(.category // "-")\t\(.id // "-")"' \
+      "\(.name // "?")\t\(if .owner == $g then "this box" elif (.owner // "") == "global" then "global" else (.owner // "-") end)\t\(.count // ((.targets // []) | length))\t\(.category // "-")\t\(.id // "-")"' \
     | awk -F'\t' 'BEGIN{printf "%-30s %-10s %-8s %-12s %s\n","NAME","OWNER","ENTRIES","CATEGORY","ID"}
                   {printf "%-30s %-10s %-8s %-12s %s\n",$1,$2,$3,$4,$5}'
 }

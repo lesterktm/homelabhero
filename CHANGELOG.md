@@ -24,6 +24,25 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-4-3"></a>
+
+## 1.4.3 (2026-08-20)
+
+### Fixed
+
+- `hh firewalla targetlists` reports the real size of every list. The ENTRIES
+  column counted an inlined `targets` array, which the built-in lists do not
+  carry - OISD alone is about 59,000 domains, so returning them on every row
+  would be absurd - and counting the absent array printed 0 for all of them.
+  That reads as "this list is empty" when the truth was "we were not told",
+  which is the sort of confidently wrong number this integration exists to
+  avoid.
+
+  It now prefers the row's own `count`, which the API does send inline for
+  every list, and falls back to counting `targets` where a row has one. No
+  extra API calls. A genuine `count` of 0 still prints 0: jq's `//` falls
+  through only on null and false.
+
 <a id="v1-4-2"></a>
 
 ## 1.4.2 (2026-08-20)

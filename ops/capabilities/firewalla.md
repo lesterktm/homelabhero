@@ -115,6 +115,10 @@ anything else.
   box-owned lists, so an unscoped call both hides this box's lists and shows
   nothing about which box anything belongs to.
 
+  ENTRIES is the list's real size (OISD is ~59,000 domains). It comes from the
+  row's own `count`, falling back to counting an inlined `targets` array for
+  lists that carry one.
+
 Reading rules is how you check whether a block is actually in place, and
 whether a rule is `active` or `paused`. A paused rule explains a surprising
 amount of "I thought I blocked that".
