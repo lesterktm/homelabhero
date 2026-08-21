@@ -100,12 +100,20 @@ anything else.
   (action, target type and value, scope, status, id)
 - Target lists (blocklists/allowlists that rules build on): `hh firewalla targetlists`
 
-  Box-scoped, and worth knowing why that changes what you see. A target list
-  belongs either to the MSP globally or to one specific box, and the endpoint's
-  default returns only the global and Firewalla-managed ones - it omits every
-  box-owned list. This asks for `global,<this box>`, so the table is the lists
-  that actually apply to this box: the global ones it inherits, plus its own.
-  The OWNER column says which is which (`global` or `this box`).
+  Box-scoped. Owner is three categories, and the OWNER column names which:
+
+  - `firewalla` - the built-in curated lists Firewalla ships (OISD, DoH
+    Services, Tor Exit Nodes, ...). On most accounts these are nearly all of
+    them, and they belong to neither the MSP nor any box.
+  - `global` - lists the MSP account itself defines.
+  - `this box` - lists owned by the box this alias reads.
+
+  The query names all three, so the table is every list that actually applies to
+  this box. Lists owned by a *different* box are excluded, which is the point.
+
+  The endpoint's own default is `global` + `firewalla` and silently omits
+  box-owned lists, so an unscoped call both hides this box's lists and shows
+  nothing about which box anything belongs to.
 
 Reading rules is how you check whether a block is actually in place, and
 whether a rule is `active` or `paused`. A paused rule explains a surprising

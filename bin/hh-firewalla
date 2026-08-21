@@ -494,16 +494,22 @@ op_rules() {
 op_targetlists() {
   local box j rows
   box="$(_box)" || exit $?
-  # A target list belongs either to the MSP globally or to one specific box, and
-  # the endpoint's default is neither one thing nor the other: it returns the
-  # global and Firewalla-managed lists and silently omits every box-owned list.
-  # Asking for "global,<gid>" is what makes this the lists that actually apply to
-  # THIS box - the global ones it inherits, plus its own.
-  j="$(_get "${MSP_V2}/target-lists?owner=$(_urlenc "global,${box}")")" || exit $?
+  # Owner is THREE categories, not two, and the difference is easy to get wrong:
+  #   global    - lists the MSP account itself defines
+  #   firewalla - the built-in curated lists Firewalla ships (OISD, DoH
+  #               Services, Tor Exit Nodes, ...), which are the bulk of what
+  #               most accounts have and are owned by neither the MSP nor a box
+  #   <gid>     - lists owned by one specific box
+  # The endpoint's default returns global + firewalla and silently omits
+  # box-owned lists. Naming only "global,<gid>" therefore does not narrow the
+  # default - it drops every built-in list, which on an account whose lists are
+  # all built-ins means an empty table. All three are named here on purpose.
+  j="$(_get "${MSP_V2}/target-lists?owner=$(_urlenc "global,firewalla,${box}")")" || exit $?
   rows="$(_rows "$j" "target-lists")" || exit $?
   # Owner comes back as a raw gid for a box-owned list, which is 36 characters of
   # column-wrecking noise that tells the reader nothing they did not just ask
-  # for. Say which of the two things it is instead.
+  # for. Rewrite that one case; "global" and "firewalla" already read correctly
+  # as themselves and fall through deliberately.
   printf '%s' "$rows" | jq -r --arg g "$box" '.[] |
       "\(.name // "?")\t\(if .owner == $g then "this box" elif (.owner // "") == "global" then "global" else (.owner // "-") end)\t\((.targets // []) | length)\t\(.category // "-")\t\(.id // "-")"' \
     | awk -F'\t' 'BEGIN{printf "%-30s %-10s %-8s %-12s %s\n","NAME","OWNER","ENTRIES","CATEGORY","ID"}

@@ -24,6 +24,34 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-4-2"></a>
+
+## 1.4.2 (2026-08-20)
+
+Fixes a regression in 1.4.1 that emptied the target list table.
+
+### Fixed
+
+- `hh firewalla targetlists` shows the built-in lists again. 1.4.1 scoped the
+  query to `owner=global,<gid>` on the understanding that a list belongs either
+  to the MSP or to a box. There is a third owner: `firewalla`, the curated lists
+  Firewalla ships (OISD, DoH Services, Tor Exit Nodes, and so on), owned by
+  neither. On a real account those are the overwhelming majority - one box here
+  had 13 built-ins, 0 global - so naming only `global,<gid>` did not narrow the
+  default, it deleted almost everything from the table. One alias returned no
+  rows at all; the other returned only its single custom list.
+
+  The query is now `owner=global,firewalla,<gid>`, which is every list that
+  applies to this box while still excluding lists owned by a *different* box.
+
+  The mistake was reading the endpoint's documented default - "global target
+  lists and Firewalla-managed target lists" - as one category described twice
+  rather than two. The comment above the call now spells out all three, since
+  that misreading is what produced the bug.
+
+  Caught in live testing on a two-box account; no stub would have found it,
+  because the fixture had been written from the same wrong assumption.
+
 <a id="v1-4-1"></a>
 
 ## 1.4.1 (2026-08-20)
