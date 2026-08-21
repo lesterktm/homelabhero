@@ -314,10 +314,16 @@ op_boxes() {
   local j rows
   j="$(_boxes_json)" || exit $?
   rows="$(_rows "$j" "${MSP_V2}/boxes")" || exit $?
-  printf '%s' "$rows" | jq -r "${JQ_TS}"'.[] |
-      "\(.name // "?")\t\(.model // "?")\t\(.mode // "-")\t\(if .online then "online" else "OFFLINE" end)\t\(.version // "-")\t\(.gid // "-")"' \
-    | awk -F'\t' 'BEGIN{printf "%-22s %-10s %-9s %-9s %-14s %s\n","NAME","MODEL","MODE","STATE","VERSION","GID"}
-                  {printf "%-22s %-10s %-9s %-9s %-14s %s\n",$1,$2,$3,$4,$5,$6}'
+  # Reads the raw $BOX global straight from the registry rather than calling
+  # _box(). This op reports the CURRENT pin state, so it must not force
+  # resolution - and on an unpinned entry with several boxes, _box() refuses
+  # outright, which would make the one command that shows you the gids the one
+  # command you cannot run to find them.
+  printf '%s' "$rows" | jq -r --arg g "$BOX" "${JQ_TS}"'.[] |
+      "\(.name // "?")\t\(.model // "?")\t\(.mode // "-")\t\(if .online then "online" else "OFFLINE" end)\t\(.version // "-")\t\(.gid // "-")\t\(if .gid == $g and $g != "" then "<- this alias" else "" end)"' \
+    | awk -F'\t' 'BEGIN{printf "%-22s %-10s %-9s %-9s %-14s %-38s %s\n","NAME","MODEL","MODE","STATE","VERSION","GID",""}
+                  {printf "%-22s %-10s %-9s %-9s %-14s %-38s %s\n",$1,$2,$3,$4,$5,$6,$7}'
+  [ -n "$BOX" ] || printf '\n(this alias is not pinned to a box yet; it will resolve on first use, or re-register to choose: hh rm-host %s && hh add-firewalla)\n' "$ALIAS"
 }
 
 op_info() { _this_box; }
@@ -486,11 +492,20 @@ op_rules() {
 }
 
 op_targetlists() {
-  local j rows
-  j="$(_get "${MSP_V2}/target-lists")" || exit $?
+  local box j rows
+  box="$(_box)" || exit $?
+  # A target list belongs either to the MSP globally or to one specific box, and
+  # the endpoint's default is neither one thing nor the other: it returns the
+  # global and Firewalla-managed lists and silently omits every box-owned list.
+  # Asking for "global,<gid>" is what makes this the lists that actually apply to
+  # THIS box - the global ones it inherits, plus its own.
+  j="$(_get "${MSP_V2}/target-lists?owner=$(_urlenc "global,${box}")")" || exit $?
   rows="$(_rows "$j" "target-lists")" || exit $?
-  printf '%s' "$rows" | jq -r '.[] |
-      "\(.name // "?")\t\(.owner // "msp")\t\((.targets // []) | length)\t\(.category // "-")\t\(.id // "-")"' \
+  # Owner comes back as a raw gid for a box-owned list, which is 36 characters of
+  # column-wrecking noise that tells the reader nothing they did not just ask
+  # for. Say which of the two things it is instead.
+  printf '%s' "$rows" | jq -r --arg g "$box" '.[] |
+      "\(.name // "?")\t\(if .owner == $g then "this box" elif (.owner // "") == "global" then "global" else (.owner // "-") end)\t\((.targets // []) | length)\t\(.category // "-")\t\(.id // "-")"' \
     | awk -F'\t' 'BEGIN{printf "%-30s %-10s %-8s %-12s %s\n","NAME","OWNER","ENTRIES","CATEGORY","ID"}
                   {printf "%-30s %-10s %-8s %-12s %s\n",$1,$2,$3,$4,$5}'
 }

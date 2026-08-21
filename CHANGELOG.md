@@ -24,6 +24,51 @@ easy to get wrong and changes if a date is added to the heading.
 When adding a version, keep the three in sync: the anchor (`v1-1-0`), the git
 tag (`v1.1.0`), and `HH_VERSION` in `bin/hh` (`1.1.0`).
 
+<a id="v1-4-1"></a>
+
+## 1.4.1 (2026-08-20)
+
+Closes the last unscoped Firewalla op, and two places that left you guessing.
+
+### Fixed
+
+- `hh firewalla targetlists` is scoped to this alias's box. It was the one op
+  missed when everything else was box-scoped, and the effect was the opposite of
+  what "unscoped" suggests: a target list belongs either to the MSP globally or
+  to one specific box, and the endpoint's DEFAULT returns only the global and
+  Firewalla-managed lists, silently omitting every box-owned one. So this was
+  not leaking another site's lists - it was hiding your own. It now asks for
+  `owner=global,<gid>`, which is the documented way to say "the global lists
+  this box inherits, plus the ones it owns". The OWNER column renders `global`
+  or `this box` rather than a 36-character gid.
+
+- `hh repin` on a Firewalla explains itself. It used to say only "'x' is not a
+  UniFi console", which is true and useless: a Firewalla is the other
+  API-reached platform, so trying to re-pin one is a reasonable thing to do. It
+  now says there is no TLS pin to refresh - an MSP domain has a publicly trusted
+  certificate, so ordinary CA validation applies and nothing is pinned - and
+  points at what the person probably wanted, which is changing WHICH BOX the
+  alias reads.
+
+### Added
+
+- `hh firewalla boxes` marks the row this alias is pinned to with
+  `<- this alias`, and says so plainly when the alias is not pinned yet.
+
+  It reads the registry's `BOX=` value directly instead of resolving through
+  `_box()`, deliberately: this op reports the current pin state, and on an
+  unpinned entry with several boxes `_box()` refuses outright - which would make
+  the one command that shows you the gids the one command you cannot run to find
+  them.
+
+### Notes
+
+Ported from upstream's v1.3.1, which fixed the same multi-box problem
+independently and arrived at nearly the same design. Kept to this fork's
+conventions (`_box()`, `BOX=`/`BOX_NAME=`, `_rows()`) rather than upstream's
+`_gid()`/`GID=`, so the two remain readable side by side without being merge
+conflicts waiting to happen.
+
 <a id="v1-4-0"></a>
 
 ## 1.4.0 (2026-08-20)

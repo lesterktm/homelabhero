@@ -9,7 +9,7 @@
 #
 set -euo pipefail
 
-HH_VERSION="1.4.0"
+HH_VERSION="1.4.1"
 REG_DIR="/etc/homelabhero/hosts.d"
 VAULT_DIR="/etc/homelabhero/vault"
 VAULT_USER="hhvault"
@@ -900,7 +900,20 @@ cmd_repin() {
   [ "$#" -eq 1 ] || die "usage: hh repin <alias>"
   local alias="$1" f="${REG_DIR}/$1.conf"
   [ -f "$f" ] || die "no such host"
-  _is_unifi "$alias" || die "'${alias}' is not a UniFi console"
+  # A Firewalla lands here often enough to deserve a real answer: it is the other
+  # API-reached platform, so "re-pin it" is a reasonable thing to try, and the
+  # generic refusal explains neither why it does not apply nor what does.
+  if ! _is_unifi "$alias"; then
+    if _is_firewalla "$alias"; then
+      die "'${alias}' is a Firewalla, which has no TLS pin to refresh: it is reached at
+    an MSP domain with a publicly trusted certificate, so ordinary CA validation
+    applies and there is nothing pinned to go stale. If you meant to change WHICH
+    BOX this alias reads, re-register it and pick again:
+        hh rm-host ${alias} && hh add-firewalla"
+    fi
+    die "'${alias}' is not a UniFi console. Only a UniFi console is TLS-pinned,
+    because only it presents a self-signed certificate."
+  fi
   [ "$(id -u)" -eq 0 ] || sudo -v || die "repin needs sudo (run from an admin shell, not the Claude UI)"
   local host port pin
   host="$(conf_get "$f" HOST)"; port="$(conf_get "$f" PORT)"

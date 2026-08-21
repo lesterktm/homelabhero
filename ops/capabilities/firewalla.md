@@ -51,6 +51,7 @@ the wrong firewall. Re-register it to fix.
 - Reachability check: `hh firewalla ping`
 - Full box record as JSON: `hh firewalla info`
 - Every box on the MSP account: `hh firewalla boxes`
+  (the row this alias is pinned to is marked `<- this alias`)
 
 `summary` reports the model, firmware version, routing mode, online state,
 public (WAN) IP, and the device / rule / active-alarm counts, followed by the
@@ -98,6 +99,13 @@ anything else.
 - Configured firewall rules: `hh firewalla rules`
   (action, target type and value, scope, status, id)
 - Target lists (blocklists/allowlists that rules build on): `hh firewalla targetlists`
+
+  Box-scoped, and worth knowing why that changes what you see. A target list
+  belongs either to the MSP globally or to one specific box, and the endpoint's
+  default returns only the global and Firewalla-managed ones - it omits every
+  box-owned list. This asks for `global,<this box>`, so the table is the lists
+  that actually apply to this box: the global ones it inherits, plus its own.
+  The OWNER column says which is which (`global` or `this box`).
 
 Reading rules is how you check whether a block is actually in place, and
 whether a rule is `active` or `paused`. A paused rule explains a surprising

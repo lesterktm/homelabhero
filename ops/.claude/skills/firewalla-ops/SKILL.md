@@ -75,7 +75,8 @@ that risk.
     hh firewalla device <q>     one device in full, by MAC, name, or IP
     hh firewalla rules          firewall rules: action, target, scope, status
     hh firewalla targetlists    blocklists and allowlists rules are built from
-    hh firewalla boxes          every box on the MSP account
+    hh firewalla boxes          every box on the account; the one this alias
+                                reads is marked "<- this alias"
     hh firewalla info           full box record as JSON
     hh firewalla stats [type]   account rollup, or a leaderboard: type is
                                 topBoxesByBlockedFlows, topBoxesBySecurityAlarms,
